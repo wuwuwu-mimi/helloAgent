@@ -78,6 +78,7 @@ class RagTool(Tool):
                 name="action",
                 type="string",
                 description="动作类型，可选 add/search/answer/context/clear/sources。",
+                choices=["add", "search", "answer", "context", "clear", "sources"],
             ),
             ToolParameter(
                 name="path",

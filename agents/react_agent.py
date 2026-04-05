@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from core import Config, HelloAgentsLLM, Message
 from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
-from tools.builtin.tool_base import Tool
+from tools.builtin.tool_base import Tool, ToolValidationError
 
 from .reasoning_agent_base import ReasoningAgentBase
 
@@ -234,10 +234,10 @@ class ReactAgent(ReasoningAgentBase):
         if payload in (None, ""):
             if parameters:
                 raise ValueError(f"Tool '{tool.name}' requires parameters.")
-            return {}
+            return tool.normalize_parameters({})
 
         if isinstance(payload, dict):
-            return payload
+            return tool.normalize_parameters(payload)
 
         if isinstance(payload, list):
             parameter_names = [item.name for item in parameters]
@@ -245,17 +245,20 @@ class ReactAgent(ReasoningAgentBase):
                 raise ValueError(
                     f"Tool '{tool.name}' expected {len(parameter_names)} parameters, got {len(payload)}."
                 )
-            return dict(zip(parameter_names, payload, strict=True))
+            return tool.normalize_parameters(dict(zip(parameter_names, payload, strict=True)))
 
         if len(parameters) == 1:
-            return {parameters[0].name: payload}
+            return tool.normalize_parameters({parameters[0].name: payload})
 
         if not parameters:
-            return {}
+            raise ValueError(f"Tool '{tool.name}' does not take parameters.")
 
-        raise ValueError(
-            f"Tool '{tool.name}' requires structured input. Please pass a JSON object."
-        )
+        try:
+            return tool.normalize_parameters({})
+        except ToolValidationError as exc:
+            raise ValueError(
+                f"Tool '{tool.name}' requires structured input. Please pass a JSON object."
+            ) from exc
 
     def _parse_tool_input(self, action_input: Optional[str]) -> Any:
         """

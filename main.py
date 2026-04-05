@@ -12,6 +12,7 @@ from memory.rag import RagPipeline
 from tools.builtin.get_time import GetTimeTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.rag_tool import RagTool
+from tools.builtin.tool_base import Tool, ToolParameter, ToolValidationError
 from tools.builtin.toolRegistry import ToolRegistry
 
 
@@ -131,6 +132,53 @@ class NativeReflectionSmokeLLM:
             return ChatResult(text="修订后答案：我已经通过工具确认当前时间，并确保表达更清晰。")
 
         return ChatResult(text="")
+
+
+class SchemaSmokeTool(Tool):
+    """
+    专门用于演示第一版工具 schema 校验的测试工具。
+
+    修改说明：这里不依赖真实外部服务，只验证“参数约束 -> 归一化 -> 错误提示”
+    这条链路是否已经具备最小可用能力。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="schema_smoke_tool",
+            description="用于验证工具 schema 校验与参数归一化的演示工具。",
+        )
+
+    def run(self, parameters: dict[str, object]) -> str:
+        """把归一化后的参数直接格式化输出，方便在 smoke test 里观察。"""
+        return (
+            f"mode={parameters.get('mode')} | "
+            f"level={parameters.get('level')} | "
+            f"dry_run={parameters.get('dry_run')}"
+        )
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(
+                name="mode",
+                type="string",
+                description="运行模式。",
+                choices=["safe", "fast"],
+            ),
+            ToolParameter(
+                name="level",
+                type="integer",
+                description="执行级别。",
+                required=False,
+                default=1,
+            ),
+            ToolParameter(
+                name="dry_run",
+                type="boolean",
+                description="是否只做演练，不真正执行。",
+                required=False,
+                default=False,
+            ),
+        ]
 
 
 def configure_logging() -> None:
@@ -773,6 +821,43 @@ def test_native_reflection_smoke() -> None:
     print_run_summary("Reflection 原生 Tool Calling 测试", answer, agent.current_history)
 
 
+def test_tool_schema_smoke() -> None:
+    """
+    运行一个工具 schema 冒烟测试。
+
+    修改说明：先验证第一版 schema 骨架已经支持：
+    1. 生成 function calling schema
+    2. 把字符串参数归一化成目标类型
+    3. 在非法枚举值时返回清晰错误
+    """
+    tool = SchemaSmokeTool()
+    valid_parameters = tool.normalize_parameters(
+        {
+            "mode": "safe",
+            "level": "3",
+            "dry_run": "true",
+        }
+    )
+
+    print("\n" + "=" * 24)
+    print("Tool Schema 测试")
+    print("=" * 24)
+    print("生成的参数 Schema：")
+    print(tool.get_parameters_schema())
+    print("\n归一化后的参数：")
+    print(valid_parameters)
+    print("工具执行结果：")
+    print(tool.run(valid_parameters))
+
+    print("\n非法参数示例：")
+    try:
+        tool.normalize_parameters({"mode": "broken"})
+    except ToolValidationError as exc:
+        print(str(exc))
+    else:
+        print("未触发预期错误，请检查 schema 校验逻辑。")
+
+
 def run_demo(target: str = "reflection") -> None:
     """根据名称运行指定的示例，方便你在一个入口里切换不同 Agent。"""
     demos = {
@@ -787,6 +872,7 @@ def run_demo(target: str = "reflection") -> None:
         "routing_smoke": test_context_routing_smoke,
         "conflict_smoke": test_context_conflict_smoke,
         "summary_smoke": test_summary_smoke,
+        "tool_schema_smoke": test_tool_schema_smoke,
         "native_tool_smoke": test_native_tool_calling_smoke,
         "native_plan_smoke": test_native_plan_smoke,
         "native_reflection_smoke": test_native_reflection_smoke,

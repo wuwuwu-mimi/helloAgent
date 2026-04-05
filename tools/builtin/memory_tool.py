@@ -86,6 +86,7 @@ class MemoryTool(Tool):
                 name="action",
                 type="string",
                 description="动作类型，可选 recent/search/context/summary/remember/clear。",
+                choices=["recent", "search", "context", "summary", "remember", "clear"],
             ),
             ToolParameter(
                 name="query",

@@ -1,19 +1,31 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from copy import deepcopy
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class ToolValidationError(ValueError):
+    """工具参数不符合 schema 时抛出的统一异常。"""
 
 
 class ToolParameter(BaseModel):
-    """定义工具参数，便于统一生成说明文本和参数 Schema。"""
+    """
+    定义工具参数，便于统一生成说明文本和参数 Schema。
+
+    修改说明：第一版 schema 骨架除了基础类型外，再补上 choices / items_type，
+    这样后面接原生 tool calling 时，模型和本地执行器都能共享同一份约束。
+    """
 
     name: str
     type: str
     description: str
     required: bool = True
     default: Any = None
+    choices: List[Any] = Field(default_factory=list)
+    items_type: Optional[str] = None
 
 
 class Tool(ABC):
@@ -46,6 +58,10 @@ class Tool(ABC):
                 "type": parameter.type,
                 "description": parameter.description,
             }
+            if parameter.choices:
+                field_schema["enum"] = list(parameter.choices)
+            if parameter.type == "array" and parameter.items_type:
+                field_schema["items"] = {"type": parameter.items_type}
             if parameter.default is not None:
                 field_schema["default"] = parameter.default
 
@@ -61,6 +77,138 @@ class Tool(ABC):
             schema["required"] = required
         return schema
 
+    def normalize_parameters(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        按工具 schema 校验并归一化参数。
+
+        修改说明：先把“缺参 / 多参 / 类型不匹配 / 枚举不合法”统一拦在工具执行前，
+        这样 Agent 层只需要准备参数形状，不需要了解每个工具自己的细节。
+        """
+        if not isinstance(parameters, dict):
+            raise ToolValidationError(f"Tool '{self.name}' expects an object-like parameter mapping.")
+
+        parameter_defs = {item.name: item for item in self.get_parameters()}
+        unknown_keys = [key for key in parameters if key not in parameter_defs]
+        if unknown_keys:
+            joined = ", ".join(sorted(str(key) for key in unknown_keys))
+            raise ToolValidationError(f"Tool '{self.name}' got unexpected parameters: {joined}.")
+
+        normalized: Dict[str, Any] = {}
+        for item in self.get_parameters():
+            has_value = item.name in parameters and parameters[item.name] is not None
+            if not has_value:
+                if item.default is not None:
+                    normalized[item.name] = deepcopy(item.default)
+                    continue
+                if item.required:
+                    raise ToolValidationError(f"Tool '{self.name}' requires parameter '{item.name}'.")
+                continue
+
+            normalized[item.name] = self._normalize_parameter_value(item, parameters[item.name])
+        return normalized
+
+    def _normalize_parameter_value(self, parameter: ToolParameter, value: Any) -> Any:
+        """根据参数 schema 做最小可用的类型归一化。"""
+        coerced = self._coerce_value(parameter, value)
+        if parameter.choices and coerced not in parameter.choices:
+            choices = ", ".join(str(item) for item in parameter.choices)
+            raise ToolValidationError(
+                f"Tool '{self.name}' parameter '{parameter.name}' must be one of: {choices}."
+            )
+        return coerced
+
+    def _coerce_value(self, parameter: ToolParameter, value: Any) -> Any:
+        """把常见字符串输入尽量转成 schema 约定的 Python 类型。"""
+        target_type = parameter.type.strip().lower()
+
+        if target_type == "string":
+            if isinstance(value, (dict, list)):
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' expects a string."
+                )
+            return str(value)
+
+        if target_type == "integer":
+            if isinstance(value, bool):
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' expects an integer, got boolean."
+                )
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float) and value.is_integer():
+                return int(value)
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    try:
+                        return int(text)
+                    except ValueError as exc:
+                        raise ToolValidationError(
+                            f"Tool '{self.name}' parameter '{parameter.name}' expects an integer."
+                        ) from exc
+            raise ToolValidationError(
+                f"Tool '{self.name}' parameter '{parameter.name}' expects an integer."
+            )
+
+        if target_type == "number":
+            if isinstance(value, bool):
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' expects a number, got boolean."
+                )
+            if isinstance(value, (int, float)):
+                return value
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    try:
+                        return float(text)
+                    except ValueError as exc:
+                        raise ToolValidationError(
+                            f"Tool '{self.name}' parameter '{parameter.name}' expects a number."
+                        ) from exc
+            raise ToolValidationError(
+                f"Tool '{self.name}' parameter '{parameter.name}' expects a number."
+            )
+
+        if target_type == "boolean":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"true", "1", "yes", "y", "on"}:
+                    return True
+                if normalized in {"false", "0", "no", "n", "off"}:
+                    return False
+            raise ToolValidationError(
+                f"Tool '{self.name}' parameter '{parameter.name}' expects a boolean."
+            )
+
+        if target_type == "array":
+            if not isinstance(value, list):
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' expects an array."
+                )
+            if not parameter.items_type:
+                return value
+            item_parameter = ToolParameter(
+                name=f"{parameter.name}[]",
+                type=parameter.items_type,
+                description=parameter.description,
+                required=True,
+            )
+            return [self._coerce_value(item_parameter, item) for item in value]
+
+        if target_type == "object":
+            if not isinstance(value, dict):
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' expects an object."
+                )
+            return value
+
+        # 修改说明：先保底原样返回，后续如果要扩展 date / enum object 等类型，
+        # 可以继续在这里补更细粒度的 schema 适配。
+        return value
+
     def format_for_prompt(self) -> str:
         """
         生成适合直接写进 Prompt 的工具说明文本。
@@ -72,7 +220,10 @@ class Tool(ABC):
             return f"- {self.name}: {self.description} 用法: {self.name}[]"
 
         parameter_text = ", ".join(
-            f"{item.name}<{item.type}>{' 必填' if item.required else ' 可选'}: {item.description}"
+            (
+                f"{item.name}<{item.type}>{' 必填' if item.required else ' 可选'}: {item.description}"
+                + (f" 可选值={item.choices}" if item.choices else "")
+            )
             for item in parameters
         )
         return f"- {self.name}: {self.description} 参数: {parameter_text}"

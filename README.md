@@ -567,6 +567,12 @@ main.run_demo("native_reflection_smoke")
 - 摘要被注入后的完整上下文
 - 摘要层与原始结构化记忆层是如何同时存在的
 
+在 `tool_schema_smoke` 演示里，会直接看到：
+
+- 工具自动生成的参数 Schema
+- 字符串参数被归一化为 `integer / boolean`
+- 非法枚举值时的本地校验错误提示
+
 在 `native_tool_smoke` 演示里，会直接看到：
 
 - 模型返回的 `tool_calls`
@@ -613,6 +619,7 @@ main.run_demo("native_reflection_smoke")
 
 - 仍然偏学习 / 实验用途，不是生产框架
 - schema 和原生 tool calling 还没有完全接上
+- 工具 schema 当前已经有第一版本地校验骨架，但还没有补到复杂嵌套结构和更细的约束
 - 原生 tool calling 已覆盖 `ReactAgent / Plan-and-Solve / Reflection`，并抽成了公共执行层
 - 但 schema 校验、并行工具调用、失败恢复策略还没有补完整
 - 工具系统目前比较轻量
@@ -635,6 +642,8 @@ main.run_demo("native_reflection_smoke")
 - 更完整的上下文工程策略
 - 更完善的测试和示例
 - 更真实的向量库 / 图数据库接入
+
+当前阶段性的收尾优先级，我也单独整理到了仓库根目录的 `TODO.md`。
 
 ## 为什么公开这个仓库
 
