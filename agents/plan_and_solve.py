@@ -5,7 +5,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from core import Config, HelloAgentsLLM
+from core import Config, HelloAgentsLLM, Message
 from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 
@@ -84,6 +84,28 @@ FINAL_PROMPT = """你是一名总结专家。
 {step_results}
 """
 
+NATIVE_STEP_TOOL_CALLING_PROMPT = """你是一名严格执行计划的 AI 助手。
+你需要根据原始问题、完整计划和已有步骤结果，专注完成“当前步骤”。
+
+要求：
+1. 如果需要更多信息，请直接调用合适的工具。
+2. 如果当前步骤已经可以完成，请直接输出该步骤结果。
+3. 不要跳过当前步骤，也不要提前生成最终答案。
+4. 回答时优先基于工具结果、显式上下文和当前步骤要求。
+
+原始问题：
+{question}
+
+完整计划：
+{plan}
+
+已完成步骤：
+{completed_steps}
+
+当前步骤：
+{current_step}
+"""
+
 
 class PlanAndSolveAgent(ReactAgent):
     """先规划、再逐步求解的 Plan-and-Solve Agent。"""
@@ -120,6 +142,7 @@ class PlanAndSolveAgent(ReactAgent):
         self.final_prompt = final_prompt or FINAL_PROMPT
         self.last_plan: List[str] = []
         self.last_step_results: List[Dict[str, str]] = []
+        self.enable_native_tool_calling = True
 
     def run(self, input_text: str, stream: bool = False, **kwargs: Any) -> str:
         """
@@ -209,6 +232,15 @@ class PlanAndSolveAgent(ReactAgent):
         **kwargs: Any,
     ) -> str:
         """对单个计划步骤执行一个小型 ReAct 循环。"""
+        if self._should_use_native_tool_calling():
+            return self._solve_step_with_native_tool_calling(
+                question=question,
+                plan=plan,
+                current_step=current_step,
+                completed_steps=completed_steps,
+                **kwargs,
+            )
+
         step_history: List[str] = []
 
         for round_index in range(1, self.max_step_rounds + 1):
@@ -247,6 +279,98 @@ class PlanAndSolveAgent(ReactAgent):
             step_history.append(f"Observation: {observation}")
 
         return f"Step unfinished after {self.max_step_rounds} rounds: {current_step}"
+
+    def _solve_step_with_native_tool_calling(
+        self,
+        *,
+        question: str,
+        plan: List[str],
+        current_step: str,
+        completed_steps: List[Dict[str, str]],
+        **kwargs: Any,
+    ) -> str:
+        """对单个计划步骤执行原生 tool calling 循环。"""
+        step_history: List[str] = []
+        context_packet = self._build_context_packet()
+        rendered_context = context_packet.render(
+            max_chars=self.config.context_max_chars,
+            max_sections=self.config.context_max_sections,
+            section_max_chars=self.config.context_section_max_chars,
+        )
+        messages = []
+        if rendered_context:
+            messages.append(
+                self._build_context_system_message(rendered_context)
+            )
+        messages.append(
+            self._build_native_user_message(
+                NATIVE_STEP_TOOL_CALLING_PROMPT.format(
+                    question=question,
+                    plan=self._render_plan(plan),
+                    completed_steps=self._render_completed_steps(completed_steps),
+                    current_step=current_step,
+                )
+            )
+        )
+
+        for round_index in range(1, self.max_step_rounds + 1):
+            logger.info("当前步骤 `%s` 第 %s 轮原生 tool calling 求解", current_step, round_index)
+            result = self.llm.chat(
+                messages=messages,
+                stream=False,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                tools=self.tool_registry.get_available_tools(),
+                tool_choice="auto",
+                **kwargs,
+            )
+            assistant_message = self._build_assistant_message_from_result(
+                result,
+                round_index=round_index,
+                history_target=step_history,
+                append_current_history=False,
+            )
+            messages.append(assistant_message)
+
+            if result.tool_calls:
+                for tool_call in result.tool_calls:
+                    observation = self._execute_native_tool_call(
+                        tool_call,
+                        history_target=step_history,
+                        append_current_history=False,
+                    )
+                    messages.append(
+                        self._build_native_tool_message(
+                            observation,
+                            tool_call_id=tool_call.get("id") or f"step_tool_call_{round_index}",
+                            tool_name=tool_call.get("function", {}).get("name"),
+                        )
+                    )
+                continue
+
+            final_text = (result.text or "").strip()
+            if final_text:
+                return final_text
+            step_history.append("Observation: Native tool calling returned empty response.")
+
+        return f"Step unfinished after {self.max_step_rounds} rounds: {current_step}"
+
+    @staticmethod
+    def _build_context_system_message(rendered_context: str):
+        return Message.system(rendered_context, metadata={"source": "context_engineering"})
+
+    @staticmethod
+    def _build_native_user_message(prompt: str):
+        return Message.user(prompt)
+
+    @staticmethod
+    def _build_native_tool_message(observation: str, *, tool_call_id: str, tool_name: str | None):
+        return Message.tool(
+            observation,
+            tool_call_id=tool_call_id,
+            name=tool_name,
+            metadata={"native_tool_calling": True},
+        )
 
     def _generate_final_answer(
         self,

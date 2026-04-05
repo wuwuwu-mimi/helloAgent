@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +47,90 @@ class NativeToolCallingSmokeLLM:
             tool_calls=[],
             finish_reason="stop",
         )
+
+
+@dataclass
+class NativePlanAndSolveSmokeLLM:
+    """用于验证 Plan-and-Solve 混合 tool calling 链路的假 LLM。"""
+
+    provider: str = "mock-plan-native"
+
+    def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        tools = kwargs.get("tools")
+        user_messages = [message for message in messages if getattr(message, "role", None) == "user"]
+        last_user = user_messages[-1].content if user_messages else ""
+        tool_messages = [message for message in messages if getattr(message, "role", None) == "tool"]
+
+        if not tools:
+            if "请严格按照下面格式输出" in (last_user or ""):
+                return ChatResult(text='["获取当前时间", "根据已获取的信息组织最终表述"]')
+            if "步骤结果：" in (last_user or ""):
+                return ChatResult(text="我先通过工具拿到当前时间，再基于步骤结果组织成最终回答。")
+            return ChatResult(text="")
+
+        current_step_match = re.search(r"当前步骤：\s*(.+)", last_user or "")
+        current_step = current_step_match.group(1).strip() if current_step_match else ""
+
+        if current_step == "获取当前时间":
+            if not tool_messages:
+                return ChatResult(
+                    text="",
+                    tool_calls=[
+                        {
+                            "id": "plan_get_time_001",
+                            "type": "function",
+                            "function": {"name": "get_time", "arguments": ""},
+                        }
+                    ],
+                    finish_reason="tool_calls",
+                )
+            latest_tool = tool_messages[-1].content or ""
+            return ChatResult(text=f"当前步骤已完成：我已经获取到当前时间，结果为 {latest_tool}")
+
+        return ChatResult(text="当前步骤已完成：我已经基于上一阶段结果整理好了最终表述。")
+
+
+@dataclass
+class NativeReflectionSmokeLLM:
+    """用于验证 Reflection 草稿阶段混合 tool calling 的假 LLM。"""
+
+    provider: str = "mock-reflection-native"
+
+    def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        tools = kwargs.get("tools")
+        user_messages = [message for message in messages if getattr(message, "role", None) == "user"]
+        last_user = user_messages[-1].content if user_messages else ""
+        tool_messages = [message for message in messages if getattr(message, "role", None) == "tool"]
+
+        if tools:
+            if not tool_messages:
+                return ChatResult(
+                    text="",
+                    tool_calls=[
+                        {
+                            "id": "reflection_get_time_001",
+                            "type": "function",
+                            "function": {"name": "get_time", "arguments": ""},
+                        }
+                    ],
+                    finish_reason="tool_calls",
+                )
+            latest_tool = tool_messages[-1].content or ""
+            return ChatResult(text=f"草稿答案：我已经通过工具确认当前时间，结果是 {latest_tool}。")
+
+        if "Decision:" in (last_user or ""):
+            return ChatResult(
+                text=(
+                    "Reflection: 当前答案已经基于工具结果给出了关键信息，内容完整且清晰。\n"
+                    "Decision: finish\n"
+                    "Suggestions:\n- 可以直接结束，不需要额外修订。"
+                )
+            )
+
+        if "审查意见" in (last_user or ""):
+            return ChatResult(text="修订后答案：我已经通过工具确认当前时间，并确保表达更清晰。")
+
+        return ChatResult(text="")
 
 
 def configure_logging() -> None:
@@ -644,6 +729,50 @@ def test_native_tool_calling_smoke() -> None:
     print_run_summary("原生 Tool Calling 测试", answer, agent.current_history)
 
 
+def test_native_plan_smoke() -> None:
+    """
+    运行一个 Plan-and-Solve 混合 tool calling 冒烟测试。
+
+    修改说明：规划和最终汇总仍可保持文本输出，
+    但步骤求解阶段已经可以走原生 tool calling。
+    """
+    config = Config.from_env().model_copy(update={"tool_calling_mode": "native"})
+    registry = ToolRegistry()
+    registry.register_tool(GetTimeTool())
+    agent = PlanAndSolveAgent(
+        name="native_plan_smoke",
+        llm=NativePlanAndSolveSmokeLLM(),  # type: ignore[arg-type]
+        tool_registry=registry,
+        config=config,
+        max_steps=3,
+        max_step_rounds=3,
+    )
+    answer = agent.run("请先规划，再告诉我当前时间，并说明你如何得到它。")
+    print_run_summary("Plan-and-Solve 原生 Tool Calling 测试", answer, agent.current_history)
+
+
+def test_native_reflection_smoke() -> None:
+    """
+    运行一个 Reflection 混合 tool calling 冒烟测试。
+
+    修改说明：当前先让“草稿生成”阶段走原生 tool calling，
+    反思与修订阶段继续保留现有文本链路。
+    """
+    config = Config.from_env().model_copy(update={"tool_calling_mode": "native"})
+    registry = ToolRegistry()
+    registry.register_tool(GetTimeTool())
+    agent = ReflectionAgent(
+        name="native_reflection_smoke",
+        llm=NativeReflectionSmokeLLM(),  # type: ignore[arg-type]
+        tool_registry=registry,
+        config=config,
+        max_steps=3,
+        max_reflections=2,
+    )
+    answer = agent.run("请结合工具告诉我当前时间，并确认你的答案是否完整。")
+    print_run_summary("Reflection 原生 Tool Calling 测试", answer, agent.current_history)
+
+
 def run_demo(target: str = "reflection") -> None:
     """根据名称运行指定的示例，方便你在一个入口里切换不同 Agent。"""
     demos = {
@@ -659,6 +788,8 @@ def run_demo(target: str = "reflection") -> None:
         "conflict_smoke": test_context_conflict_smoke,
         "summary_smoke": test_summary_smoke,
         "native_tool_smoke": test_native_tool_calling_smoke,
+        "native_plan_smoke": test_native_plan_smoke,
+        "native_reflection_smoke": test_native_reflection_smoke,
     }
     if target not in demos:
         raise ValueError(f"不支持的测试目标: {target}，可选值: {', '.join(demos)}")

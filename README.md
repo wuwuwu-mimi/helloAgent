@@ -97,7 +97,9 @@ Action: get_time[]
 - `Tool` 的参数定义会统一导出成 schema
 - `ToolRegistry.get_available_tools()` 会直接生成 OpenAI-compatible `tools` 结构
 - `ReactAgent` 已支持一条“原生 tool calling 主链路”
-- 当前这条链路会优先在标准 `ReactAgent` 上启用；`Plan-and-Solve / Reflection` 仍以文本解析链路为主
+- `Plan-and-Solve` 的“步骤求解阶段”已经支持混合 tool calling
+- `Reflection` 的“草稿生成阶段”已经支持混合 tool calling
+- 规划、反思审查、修订等环节目前仍主要保留文本链路
 
 ## 当前的记忆系统进展
 
@@ -383,7 +385,7 @@ TOOL_CALLING_MODE=text
 当前可选值可以理解为：
 
 - `text`：继续走原来的文本 `Thought / Action`
-- `native`：在标准 `ReactAgent` 上启用原生 tool calling
+- `native`：在已接入的 Agent 阶段上优先启用原生 tool calling
 - `auto`：当前行为与 `native` 接近，作为后续扩展保留
 
 如果你想调整会话摘要行为，也可以继续加上这些可选配置：
@@ -493,6 +495,24 @@ main.configure_logging()
 main.run_demo("native_tool_smoke")
 ```
 
+如果你想看 `Plan-and-Solve` 在“步骤求解阶段”如何混合使用原生 tool calling，可以执行：
+
+```python
+import main
+
+main.configure_logging()
+main.run_demo("native_plan_smoke")
+```
+
+如果你想看 `Reflection` 在“草稿阶段”如何混合使用原生 tool calling，可以执行：
+
+```python
+import main
+
+main.configure_logging()
+main.run_demo("native_reflection_smoke")
+```
+
 如果配置正确，终端会输出：
 
 - 最终答案
@@ -553,6 +573,18 @@ main.run_demo("native_tool_smoke")
 - 工具被执行后的 Observation
 - tool message 回填后生成的最终答案
 
+在 `native_plan_smoke` 演示里，会直接看到：
+
+- 文本规划输出
+- 原生 tool calling 驱动的步骤求解
+- 步骤结果再被汇总成最终答案
+
+在 `native_reflection_smoke` 演示里，会直接看到：
+
+- 草稿阶段的原生 `tool_calls`
+- 工具结果如何成为草稿答案依据
+- 反思阶段继续沿用现有文本审查链路
+
 如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
 ## 当前支持的 Provider 方向
@@ -578,7 +610,7 @@ main.run_demo("native_tool_smoke")
 
 - 仍然偏学习 / 实验用途，不是生产框架
 - schema 和原生 tool calling 还没有完全接上
-- 原生 tool calling 当前主要先接在标准 `ReactAgent` 上
+- 原生 tool calling 当前已经接到 `ReactAgent`，并部分扩到 `Plan-and-Solve / Reflection`
 - 工具系统目前比较轻量
 - 测试还不够系统化
 - 上下文工程目前还是轻量版，虽然已经有字符预算与去重，但还没有做真正的 token 预算

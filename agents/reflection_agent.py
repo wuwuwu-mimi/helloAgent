@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Any, List, Optional, Tuple
 
-from core import Config, HelloAgentsLLM
+from core import Config, HelloAgentsLLM, Message
 from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 
@@ -87,6 +87,18 @@ REFLECTION_REVISION_PROMPT = """你是一个负责改写答案的 AI 助手。
 {reflection}
 """
 
+NATIVE_REFLECTION_DRAFT_PROMPT = """你是一个会先行动、再反思的 AI 助手。
+请先借助工具生成一个可靠的草稿答案。
+
+要求：
+1. 当信息不足时，直接调用工具。
+2. 如果已经有足够信息，请直接给出草稿答案。
+3. 回答要优先基于工具结果和显式上下文，不要编造未观察到的信息。
+
+当前问题：
+{question}
+"""
+
 
 class ReflectionAgent(ReactAgent):
     """先生成草稿、再做自我审查、最后按需修订的 Reflection Agent。"""
@@ -122,6 +134,7 @@ class ReflectionAgent(ReactAgent):
         self.review_prompt = review_prompt or REFLECTION_REVIEW_PROMPT
         self.revision_prompt = revision_prompt or REFLECTION_REVISION_PROMPT
         self.last_grounded_observations: List[str] = []
+        self.enable_native_tool_calling = True
 
     def run(self, input_text: str, stream: bool = False, **kwargs: Any) -> str:
         """
@@ -178,6 +191,9 @@ class ReflectionAgent(ReactAgent):
         这里复用了 ReAct 的核心机制：
         模型先输出 Thought / Action，Agent 再负责执行工具并回填 Observation。
         """
+        if self._should_use_native_tool_calling():
+            return self._build_draft_with_native_tool_calling(question, **kwargs)
+
         local_history: List[str] = []
         grounded_observations: List[str] = []
 
@@ -217,6 +233,77 @@ class ReflectionAgent(ReactAgent):
             if action_type not in {"unknown"}:
                 grounded_observations.append(observation)
             local_history.append(f"Draft Observation: {observation}")
+
+        fallback = f"Reached max steps ({self.max_steps}) without producing a draft answer."
+        local_history.append(f"Draft Fallback: {fallback}")
+        self.last_grounded_observations = grounded_observations
+        self.current_history.extend(local_history)
+        logger.warning("[%s] %s", self.name, fallback)
+        return fallback
+
+    def _build_draft_with_native_tool_calling(self, question: str, **kwargs: Any) -> str:
+        """使用原生 tool calling 生成草稿答案。"""
+        local_history: List[str] = []
+        grounded_observations: List[str] = []
+        context_packet = self._build_context_packet()
+        rendered_context = context_packet.render(
+            max_chars=self.config.context_max_chars,
+            max_sections=self.config.context_max_sections,
+            section_max_chars=self.config.context_section_max_chars,
+        )
+        messages: List[Message] = []
+        if rendered_context:
+            messages.append(
+                Message.system(rendered_context, metadata={"source": "context_engineering"})
+            )
+        messages.append(Message.user(NATIVE_REFLECTION_DRAFT_PROMPT.format(question=question)))
+
+        for step in range(1, self.max_steps + 1):
+            logger.debug("[%s] 原生 tool calling 草稿阶段 step %s / %s", self.name, step, self.max_steps)
+            result = self.llm.chat(
+                messages=messages,
+                stream=False,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                tools=self.tool_registry.get_available_tools(),
+                tool_choice="auto",
+                **kwargs,
+            )
+            assistant_message = self._build_assistant_message_from_result(
+                result,
+                round_index=step,
+                history_target=local_history,
+                append_current_history=False,
+            )
+            messages.append(assistant_message)
+
+            if result.tool_calls:
+                for tool_call in result.tool_calls:
+                    observation = self._execute_native_tool_call(
+                        tool_call,
+                        history_target=local_history,
+                        append_current_history=False,
+                    )
+                    if tool_call.get("function", {}).get("name"):
+                        grounded_observations.append(observation)
+                    messages.append(
+                        Message.tool(
+                            observation,
+                            tool_call_id=tool_call.get("id") or f"draft_tool_call_{step}",
+                            name=tool_call.get("function", {}).get("name"),
+                            metadata={"native_tool_calling": True, "stage": "draft"},
+                        )
+                    )
+                continue
+
+            draft_answer = (result.text or "").strip()
+            if draft_answer:
+                local_history.append(f"Draft Finish: {draft_answer}")
+                self.last_grounded_observations = grounded_observations
+                self.current_history.extend(local_history)
+                return draft_answer
+
+            local_history.append("Draft Observation: Native tool calling returned an empty response.")
 
         fallback = f"Reached max steps ({self.max_steps}) without producing a draft answer."
         local_history.append(f"Draft Fallback: {fallback}")

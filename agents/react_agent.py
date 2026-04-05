@@ -221,7 +221,14 @@ class ReactAgent(ReasoningAgentBase):
             return False
         return self.enable_native_tool_calling and bool(self.tool_registry.list_tools())
 
-    def _build_assistant_message_from_result(self, result: Any, *, round_index: int) -> Message:
+    def _build_assistant_message_from_result(
+        self,
+        result: Any,
+        *,
+        round_index: int,
+        history_target: Optional[List[str]] = None,
+        append_current_history: bool = True,
+    ) -> Message:
         """把 LLM 返回的 tool_calls / text 结果转成统一的 assistant 消息。"""
         tool_calls = [
             ToolCall(
@@ -241,21 +248,38 @@ class ReactAgent(ReasoningAgentBase):
             preview_parts.append(
                 f"ToolCall: {item.function.name}[{item.function.arguments}]"
             )
-        self.current_history.extend(preview_parts or [f"Assistant: <empty round {round_index}>"])
+        target_entries = preview_parts or [f"Assistant: <empty round {round_index}>"]
+        if append_current_history:
+            self.current_history.extend(target_entries)
+        if history_target is not None:
+            history_target.extend(target_entries)
         return Message.assistant(
             result.text or None,
             tool_calls=tool_calls,
             metadata={"native_tool_calling": True, "round": round_index},
         )
 
-    def _execute_native_tool_call(self, tool_call: Dict[str, Any]) -> str:
+    def _execute_native_tool_call(
+        self,
+        tool_call: Dict[str, Any],
+        *,
+        history_target: Optional[List[str]] = None,
+        append_current_history: bool = True,
+    ) -> str:
         """执行一条原生 tool call，并生成对应的工具返回。"""
         function = tool_call.get("function", {}) or {}
         tool_name = str(function.get("name", "")).strip()
         arguments = function.get("arguments", "")
-        self.current_history.append(f"Action: {tool_name}[{arguments}]")
+        action_line = f"Action: {tool_name}[{arguments}]"
+        if append_current_history:
+            self.current_history.append(action_line)
+        if history_target is not None:
+            history_target.append(action_line)
         observation = self._handle_action(tool_name, arguments)
-        self._append_observation(observation)
+        if append_current_history:
+            self._append_observation(observation)
+        elif history_target is not None:
+            history_target.append(f"Observation: {observation}")
         return observation
 
     def _build_prompt(self, question: str) -> str:
