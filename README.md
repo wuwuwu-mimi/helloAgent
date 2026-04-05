@@ -267,6 +267,7 @@ helloAgent/
 │     ├─ memory_tool.py        # 记忆工具
 │     └─ rag_tool.py           # 本地检索工具
 ├─ main.py                     # 当前测试入口
+├─ PROJECT_DOC.md              # 项目总文档：文件、类、方法作用说明
 ├─ README.md
 └─ LICENSE
 ```
@@ -686,6 +687,9 @@ main.run_demo("native_reflection_smoke")
 - 更真实的向量库 / 图数据库接入
 
 当前阶段性的收尾优先级，我也单独整理到了仓库根目录的 `TODO.md`。
+
+如果你想快速了解整个仓库里“每个文件 / 类 / 方法分别负责什么”，
+可以直接先看根目录的 `PROJECT_DOC.md`。
 
 ## 为什么公开这个仓库
 
