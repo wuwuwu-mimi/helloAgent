@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from memory.base import MemoryConfig, MemoryItem
@@ -42,6 +44,18 @@ class MemoryManager:
         "rag",
         "记忆系统",
     )
+    _LOW_VALUE_PATTERNS = (
+        "好的",
+        "收到",
+        "明白",
+        "知道了",
+        "ok",
+        "okay",
+        "thanks",
+        "thank you",
+        "嗯",
+        "哦",
+    )
 
     def __init__(self, config: Optional[MemoryConfig] = None) -> None:
         self.config = config or MemoryConfig()
@@ -59,6 +73,7 @@ class MemoryManager:
             graph_store=Neo4jGraphStore(self.config),
             embedding_service=self.embedding_service,
         )
+        self._decision_log: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
     def record_message(
         self,
@@ -70,23 +85,54 @@ class MemoryManager:
         persist: bool = True,
     ) -> MemoryItem:
         """把一条消息写入记忆系统。"""
+        cleaned_content = content.strip()
+        decision = self._plan_memory_record(
+            session_id=session_id,
+            role=role,
+            content=cleaned_content,
+            metadata=metadata or {},
+            persist=persist,
+        )
+        enriched_metadata = dict(metadata or {})
+        enriched_metadata.update(
+            {
+                "memory_value": decision["value_label"],
+                "memory_reasons": list(decision["reasons"]),
+                "memory_plan": {
+                    "working": decision["store_working"],
+                    "episodic": decision["store_episodic"],
+                    "semantic": decision["store_semantic"],
+                    "skipped": decision["skipped"],
+                },
+            }
+        )
         item = MemoryItem(
             session_id=session_id,
             role=role,
-            content=content,
+            content=cleaned_content,
             memory_type="working" if not persist else "episodic",
-            metadata=metadata or {},
+            metadata=enriched_metadata,
             expires_at=self.config.working_expires_at(),
         )
-        self.working_memory.add(item.model_copy(update={"memory_type": "working"}))
-        if persist:
+        self._record_memory_decision(
+            session_id=session_id,
+            role=role,
+            content=cleaned_content,
+            decision=decision,
+        )
+        if decision["skipped"]:
+            return item.model_copy(update={"memory_type": "skipped", "expires_at": None})
+
+        if decision["store_working"]:
+            self.working_memory.add(item.model_copy(update={"memory_type": "working"}))
+        if decision["store_episodic"]:
             self.episodic_memory.add(item.model_copy(update={"memory_type": "episodic", "expires_at": None}))
-            if self.config.enable_semantic_memory:
-                # 修改说明：长期可复用的消息除了写入情景记忆，也同步写入向量记忆，
-                # 这样后续查询就不仅能靠关键词匹配，还能走最小语义召回。
-                self.semantic_memory.add(
-                    item.model_copy(update={"memory_type": "semantic", "expires_at": None})
-                )
+        if decision["store_semantic"]:
+            # 修改说明：长期可复用且有较高价值的消息才进入语义记忆，
+            # 避免把“收到/确认”这类低价值文本也推到向量库里。
+            self.semantic_memory.add(
+                item.model_copy(update={"memory_type": "semantic", "expires_at": None})
+            )
         return item
 
     def recall(
@@ -288,6 +334,26 @@ class MemoryManager:
         self.working_memory.clear(session_id)
         self.episodic_memory.clear(session_id)
         self.semantic_memory.clear(session_id)
+        self._decision_log.pop(session_id, None)
+
+    def build_memory_diagnostics(self, session_id: str, limit: int = 10) -> str:
+        """输出最近几条记忆写入决策，便于观察闭环策略是否生效。"""
+        decisions = self._decision_log.get(session_id, [])
+        if not decisions:
+            return ""
+        lines = ["最近的记忆写入决策："]
+        for index, item in enumerate(decisions[-limit:], start=1):
+            plan = item["plan"]
+            lines.append(
+                (
+                    f"{index}. [{item['role']}] value={item['value_label']} | "
+                    f"working={plan['working']} episodic={plan['episodic']} semantic={plan['semantic']} "
+                    f"skipped={plan['skipped']}"
+                )
+            )
+            lines.append(f"   reasons={', '.join(item['reasons'])}")
+            lines.append(f"   content={self._trim_summary_line(item['content'], limit=88)}")
+        return "\n".join(lines)
 
     @staticmethod
     def _dedupe_items(
@@ -297,16 +363,34 @@ class MemoryManager:
         exclude_text: Optional[str] = None,
     ) -> List[MemoryItem]:
         """对召回结果去重、过滤并截断，避免工作记忆和长期记忆重复注入。"""
-        deduped: List[MemoryItem] = []
-        seen: set[tuple[str, str, str]] = set()
+        merged: Dict[tuple[str, str], MemoryItem] = {}
         for item in sorted(items, key=lambda current: current.created_at):
             if exclude_text and item.content == exclude_text:
                 continue
-            key = (item.role, item.content, item.created_at.isoformat())
-            if key in seen:
+            key = (item.role, MemoryManager._normalize_memory_text(item.content))
+            if key not in merged:
+                merged[key] = item
                 continue
-            seen.add(key)
-            deduped.append(item)
+            existing = merged[key]
+            chosen = item if item.created_at >= existing.created_at else existing
+            sources = sorted(
+                {
+                    existing.memory_type,
+                    item.memory_type,
+                    *existing.metadata.get("recall_sources", []),
+                    *item.metadata.get("recall_sources", []),
+                }
+            )
+            chosen = chosen.model_copy(
+                update={
+                    "metadata": {
+                        **chosen.metadata,
+                        "recall_sources": sources,
+                    }
+                }
+            )
+            merged[key] = chosen
+        deduped = sorted(merged.values(), key=lambda current: current.created_at)
         return deduped[-limit:]
 
     @classmethod
@@ -326,3 +410,221 @@ class MemoryManager:
         if len(compact) <= limit:
             return compact
         return f"{compact[:limit].rstrip()}..."
+
+    def _plan_memory_record(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        metadata: Dict[str, Any],
+        persist: bool,
+    ) -> Dict[str, Any]:
+        """为一条消息选择记忆写入策略。"""
+        reasons: List[str] = []
+        if not content:
+            return self._build_memory_plan(
+                skipped=True,
+                value_label="low",
+                reasons=["empty_content"],
+            )
+
+        content_kind = self._classify_content_kind(content, role=role, metadata=metadata)
+        value_label = self._score_memory_value(content, role=role, metadata=metadata, content_kind=content_kind)
+        reasons.append(f"kind={content_kind}")
+        reasons.append(f"value={value_label}")
+
+        if self.config.enable_memory_value_filter and self._is_low_value_message(
+            content,
+            role=role,
+            metadata=metadata,
+            content_kind=content_kind,
+        ):
+            reasons.append("filtered_low_value")
+            return self._build_memory_plan(skipped=True, value_label=value_label, reasons=reasons)
+
+        if self._has_recent_duplicate(session_id, role=role, content=content):
+            reasons.append("duplicate_recent")
+            return self._build_memory_plan(skipped=True, value_label=value_label, reasons=reasons)
+
+        store_working = True
+        store_episodic = persist
+        store_semantic = (
+            persist
+            and self.config.enable_semantic_memory
+            and len(content) >= self.config.semantic_min_content_length
+            and self._should_store_in_semantic(role=role, metadata=metadata, content_kind=content_kind)
+        )
+        if store_semantic:
+            reasons.append("semantic_candidate")
+        if store_episodic:
+            reasons.append("persist_enabled")
+        else:
+            reasons.append("working_only")
+
+        return self._build_memory_plan(
+            store_working=store_working,
+            store_episodic=store_episodic,
+            store_semantic=store_semantic,
+            skipped=False,
+            value_label=value_label,
+            reasons=reasons,
+        )
+
+    @staticmethod
+    def _build_memory_plan(
+        *,
+        store_working: bool = False,
+        store_episodic: bool = False,
+        store_semantic: bool = False,
+        skipped: bool,
+        value_label: str,
+        reasons: List[str],
+    ) -> Dict[str, Any]:
+        return {
+            "store_working": store_working,
+            "store_episodic": store_episodic,
+            "store_semantic": store_semantic,
+            "skipped": skipped,
+            "value_label": value_label,
+            "reasons": reasons,
+        }
+
+    def _record_memory_decision(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        decision: Dict[str, Any],
+    ) -> None:
+        """记录一条写入决策，便于后续解释为什么某条消息被保留或忽略。"""
+        self._decision_log[session_id].append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "role": role,
+                "content": content,
+                "value_label": decision["value_label"],
+                "reasons": list(decision["reasons"]),
+                "plan": {
+                    "working": decision["store_working"],
+                    "episodic": decision["store_episodic"],
+                    "semantic": decision["store_semantic"],
+                    "skipped": decision["skipped"],
+                },
+            }
+        )
+        if len(self._decision_log[session_id]) > 40:
+            self._decision_log[session_id] = self._decision_log[session_id][-40:]
+
+    def _has_recent_duplicate(self, session_id: str, *, role: str, content: str) -> bool:
+        """检查最近窗口内是否已有相同角色和内容的记忆。"""
+        normalized = self._normalize_memory_text(content)
+        if not normalized:
+            return False
+        window = max(1, self.config.memory_duplicate_window)
+        recent_items = [
+            *self.working_memory.recent(session_id, window),
+            *self.episodic_memory.recent(session_id, window),
+        ]
+        for item in recent_items:
+            if item.role != role:
+                continue
+            if self._normalize_memory_text(item.content) == normalized:
+                return True
+        return False
+
+    def _classify_content_kind(
+        self,
+        content: str,
+        *,
+        role: str,
+        metadata: Dict[str, Any],
+    ) -> str:
+        normalized = content.strip().lower()
+        if metadata.get("source") == "tool_result":
+            return "tool_result_success" if metadata.get("tool_success", True) else "tool_result_failure"
+        if any(marker in normalized for marker in self._PREFERENCE_MARKERS):
+            return "preference"
+        if any(marker in normalized for marker in self._FACT_MARKERS):
+            return "fact"
+        memory_stage = str(metadata.get("memory_stage", "") or "").lower()
+        if memory_stage.endswith("finish") or memory_stage.endswith("final"):
+            return "final_answer"
+        if role == "user":
+            return "user_dialogue"
+        if role == "assistant":
+            return "assistant_dialogue"
+        return "other"
+
+    def _score_memory_value(
+        self,
+        content: str,
+        *,
+        role: str,
+        metadata: Dict[str, Any],
+        content_kind: str,
+    ) -> str:
+        """给消息打一个粗粒度价值标签。"""
+        del role
+        if content_kind in {"preference", "fact", "tool_result_success"}:
+            return "high"
+        if content_kind == "final_answer":
+            return "high" if len(content) >= self.config.semantic_min_content_length else "medium"
+        if metadata.get("source") == "tool_result" and not metadata.get("tool_success", True):
+            return "medium"
+        if len(content) >= max(self.config.memory_min_content_length * 3, 12):
+            return "medium"
+        return "low"
+
+    def _is_low_value_message(
+        self,
+        content: str,
+        *,
+        role: str,
+        metadata: Dict[str, Any],
+        content_kind: str,
+    ) -> bool:
+        """过滤明显噪声消息，避免把无价值文本塞进长期记忆。"""
+        normalized = content.strip().lower()
+        simplified = normalized.strip("。！？!?.,，、；;：:~ ")
+        if not normalized:
+            return True
+        if content_kind in {"preference", "fact", "tool_result_success"}:
+            return False
+        if content_kind == "final_answer" and simplified in self._LOW_VALUE_PATTERNS:
+            return True
+        if content_kind == "final_answer":
+            return False
+        if metadata.get("source") == "tool_result":
+            return False
+        if len(normalized) < self.config.memory_min_content_length:
+            return True
+        if simplified in self._LOW_VALUE_PATTERNS:
+            return True
+        if role == "assistant" and len(normalized) <= 12 and any(
+            simplified == pattern for pattern in self._LOW_VALUE_PATTERNS
+        ):
+            return True
+        return False
+
+    def _should_store_in_semantic(
+        self,
+        *,
+        role: str,
+        metadata: Dict[str, Any],
+        content_kind: str,
+    ) -> bool:
+        """判断一条持久化消息是否值得进入语义记忆。"""
+        if content_kind in {"preference", "fact", "tool_result_success", "final_answer"}:
+            return True
+        if role == "user" and content_kind == "user_dialogue":
+            return False
+        if metadata.get("source") == "tool_result":
+            return bool(metadata.get("tool_success", False))
+        return False
+
+    @staticmethod
+    def _normalize_memory_text(text: str) -> str:
+        """归一化记忆文本，便于做重复检测。"""
+        return " ".join(text.strip().lower().split())

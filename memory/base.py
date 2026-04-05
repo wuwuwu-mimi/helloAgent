@@ -70,6 +70,10 @@ class MemoryConfig(BaseModel):
     session_summary_recent_items: int = 12
     session_summary_min_messages: int = 4
     session_summary_max_lines: int = 6
+    enable_memory_value_filter: bool = True
+    memory_min_content_length: int = 4
+    memory_duplicate_window: int = 8
+    semantic_min_content_length: int = 8
     persist_user_messages: bool = True
     persist_assistant_messages: bool = True
     persist_tool_messages: bool = False
@@ -164,6 +168,22 @@ class MemoryConfig(BaseModel):
             session_summary_max_lines=_read_int(
                 defaults.session_summary_max_lines,
                 "SESSION_SUMMARY_MAX_LINES",
+            ),
+            enable_memory_value_filter=_read_bool(
+                defaults.enable_memory_value_filter,
+                "ENABLE_MEMORY_VALUE_FILTER",
+            ),
+            memory_min_content_length=_read_int(
+                defaults.memory_min_content_length,
+                "MEMORY_MIN_CONTENT_LENGTH",
+            ),
+            memory_duplicate_window=_read_int(
+                defaults.memory_duplicate_window,
+                "MEMORY_DUPLICATE_WINDOW",
+            ),
+            semantic_min_content_length=_read_int(
+                defaults.semantic_min_content_length,
+                "SEMANTIC_MIN_CONTENT_LENGTH",
             ),
             persist_user_messages=_read_bool(
                 defaults.persist_user_messages,

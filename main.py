@@ -544,6 +544,63 @@ def test_memory_workflow() -> None:
     print_memory_snapshot(agent, "第二轮后的记忆快照")
 
 
+def test_memory_closure_smoke() -> None:
+    """
+    运行一个记忆闭环冒烟测试。
+
+    修改说明：这个测试不依赖真实 LLM，重点验证：
+    1. 低价值内容会不会被过滤
+    2. 重复内容会不会被跳过
+    3. preference / fact / tool_result 会不会得到不同层级的写入策略
+    """
+    config = MemoryConfig.from_env().model_copy(
+        update={
+            "vector_store_backend": "json",
+        }
+    )
+    memory_manager = MemoryManager(config)
+    session_id = "memory_closure_smoke"
+    memory_manager.clear_session(session_id)
+
+    samples = [
+        ("assistant", "好的。", {"memory_stage": "react_finish"}),
+        ("user", "我喜欢美式咖啡，不喜欢太甜的饮品。", {}),
+        ("user", "我喜欢美式咖啡，不喜欢太甜的饮品。", {}),
+        ("assistant", "helloAgent 当前支持 ReAct、Plan-and-Solve、Reflection。", {"memory_stage": "plan_final"}),
+        (
+            "tool",
+            "当前时间为 2026-04-05 20:00:00 中国标准时间+0800",
+            {
+                "source": "tool_result",
+                "tool_name": "get_time",
+                "tool_success": True,
+                "tool_result_meta": {"tool": "get_time"},
+            },
+        ),
+    ]
+
+    for role, content, metadata in samples:
+        memory_manager.record_message(
+            session_id=session_id,
+            role=role,
+            content=content,
+            metadata=metadata,
+            persist=True,
+        )
+
+    recalled = memory_manager.build_structured_memory_prompt(
+        session_id=session_id,
+        limit=6,
+    )
+
+    print("\n" + "=" * 24)
+    print("记忆闭环冒烟测试")
+    print("=" * 24)
+    print(memory_manager.build_memory_diagnostics(session_id) or "(没有决策日志)")
+    print("\n结构化记忆召回：")
+    print(recalled or "(没有召回到记忆)")
+
+
 def test_rag_workflow() -> None:
     """
     运行一个最小可用的 RAG 测试。
@@ -1008,6 +1065,7 @@ def run_demo(target: str = "reflection") -> None:
         "plan": test_plan_and_solve_agent,
         "reflection": test_reflection_agent,
         "memory": test_memory_workflow,
+        "memory_closure_smoke": test_memory_closure_smoke,
         "rag": test_rag_workflow,
         "rag_smoke": test_rag_pipeline_smoke,
         "embedding_smoke": test_embedding_smoke,

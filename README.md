@@ -567,6 +567,13 @@ main.run_demo("native_reflection_smoke")
 - 摘要被注入后的完整上下文
 - 摘要层与原始结构化记忆层是如何同时存在的
 
+在 `memory_closure_smoke` 演示里，会直接看到：
+
+- 哪些消息会被判定为低价值并跳过
+- 哪些重复消息会被拦截
+- 哪些内容会进入 working / episodic / semantic
+- 最近的记忆写入决策日志
+
 在 `tool_schema_smoke` 演示里，会直接看到：
 
 - 工具自动生成的参数 Schema
@@ -637,6 +644,8 @@ main.run_demo("native_reflection_smoke")
 - 但还没有把熔断、统计、策略化重试等能力全部围绕它重构完
 - 原生 tool calling 已覆盖 `ReactAgent / Plan-and-Solve / Reflection`，并抽成了公共执行层
 - 但 schema 校验、并行工具调用、失败恢复策略还没有补完整
+- 记忆系统当前已经有第一版写入策略、低价值过滤、重复跳过和决策日志
+- 但长期保留策略、记忆淘汰和更细的检索解释还没有完全补齐
 - 工具系统目前比较轻量
 - 测试还不够系统化
 - 上下文工程目前还是轻量版，虽然已经有字符预算与去重，但还没有做真正的 token 预算
