@@ -597,6 +597,14 @@ def test_memory_closure_smoke() -> None:
     print("记忆闭环冒烟测试")
     print("=" * 24)
     print(memory_manager.build_memory_diagnostics(session_id) or "(没有决策日志)")
+    print("\n召回解释：")
+    print(
+        memory_manager.build_recall_diagnostics(
+            session_id=session_id,
+            limit=6,
+        )
+        or "(没有召回解释)"
+    )
     print("\n结构化记忆召回：")
     print(recalled or "(没有召回到记忆)")
 

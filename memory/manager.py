@@ -146,16 +146,47 @@ class MemoryManager:
         """组合工作记忆和情景记忆，返回与当前问题相关的上下文。"""
         resolved_limit = limit or self.config.recall_top_k
         candidates: List[MemoryItem] = []
+        normalized_query = (query or "").strip()
 
-        if query and query.strip():
-            candidates.extend(self.working_memory.search(session_id, query, resolved_limit))
-            candidates.extend(self.episodic_memory.search(session_id, query, resolved_limit))
+        if normalized_query:
+            candidates.extend(
+                self._annotate_recall_source(
+                    self.working_memory.search(session_id, normalized_query, resolved_limit),
+                    source="working_search",
+                    query=normalized_query,
+                )
+            )
+            candidates.extend(
+                self._annotate_recall_source(
+                    self.episodic_memory.search(session_id, normalized_query, resolved_limit),
+                    source="episodic_search",
+                    query=normalized_query,
+                )
+            )
             if self.config.enable_semantic_memory:
                 semantic_limit = min(resolved_limit, self.config.semantic_recall_top_k)
-                candidates.extend(self.semantic_memory.search(session_id, query, semantic_limit))
+                candidates.extend(
+                    self._annotate_recall_source(
+                        self.semantic_memory.search(session_id, normalized_query, semantic_limit),
+                        source="semantic_search",
+                        query=normalized_query,
+                    )
+                )
         else:
-            candidates.extend(self.working_memory.recent(session_id, resolved_limit))
-            candidates.extend(self.episodic_memory.recent(session_id, resolved_limit))
+            candidates.extend(
+                self._annotate_recall_source(
+                    self.working_memory.recent(session_id, resolved_limit),
+                    source="working_recent",
+                    query=None,
+                )
+            )
+            candidates.extend(
+                self._annotate_recall_source(
+                    self.episodic_memory.recent(session_id, resolved_limit),
+                    source="episodic_recent",
+                    query=None,
+                )
+            )
 
         if not candidates:
             return []
@@ -168,15 +199,33 @@ class MemoryManager:
         if deduped:
             return deduped
 
-        if query and query.strip():
+        if normalized_query:
             # 修改说明：搜索结果如果只命中了“当前输入自身”，过滤后会变空；
             # 这时再回退到最近记忆，避免 Agent 看不到上一轮真正有用的上下文。
             fallback_candidates: List[MemoryItem] = []
-            fallback_candidates.extend(self.working_memory.recent(session_id, resolved_limit))
-            fallback_candidates.extend(self.episodic_memory.recent(session_id, resolved_limit))
+            fallback_candidates.extend(
+                self._annotate_recall_source(
+                    self.working_memory.recent(session_id, resolved_limit),
+                    source="working_recent_fallback",
+                    query=normalized_query,
+                )
+            )
+            fallback_candidates.extend(
+                self._annotate_recall_source(
+                    self.episodic_memory.recent(session_id, resolved_limit),
+                    source="episodic_recent_fallback",
+                    query=normalized_query,
+                )
+            )
             if self.config.enable_semantic_memory:
                 semantic_limit = min(resolved_limit, self.config.semantic_recall_top_k)
-                fallback_candidates.extend(self.semantic_memory.recent(session_id, semantic_limit))
+                fallback_candidates.extend(
+                    self._annotate_recall_source(
+                        self.semantic_memory.recent(session_id, semantic_limit),
+                        source="semantic_recent_fallback",
+                        query=normalized_query,
+                    )
+                )
             return self._dedupe_items(
                 fallback_candidates,
                 limit=resolved_limit,
@@ -184,6 +233,37 @@ class MemoryManager:
             )
 
         return []
+
+    def build_recall_diagnostics(
+        self,
+        *,
+        session_id: str,
+        query: Optional[str] = None,
+        exclude_text: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> str:
+        """输出召回结果的来源和原因，便于解释为什么这些记忆被拿出来。"""
+        items = self.recall(
+            session_id=session_id,
+            query=query,
+            limit=limit or self.config.recall_top_k,
+            exclude_text=exclude_text,
+        )
+        if not items:
+            return ""
+
+        lines = ["最近一次记忆召回解释："]
+        for index, item in enumerate(items, start=1):
+            recall_sources = item.metadata.get("recall_sources", [])
+            recall_reason = str(item.metadata.get("recall_reason", "") or "").strip()
+            memory_value = str(item.metadata.get("memory_value", "") or "").strip()
+            lines.append(
+                f"{index}. [{item.role}] sources={','.join(recall_sources) or item.memory_type} value={memory_value or '-'}"
+            )
+            if recall_reason:
+                lines.append(f"   reason={recall_reason}")
+            lines.append(f"   content={self._trim_summary_line(item.content, limit=88)}")
+        return "\n".join(lines)
 
     def build_memory_prompt(
         self,
@@ -207,7 +287,9 @@ class MemoryManager:
             "以下是与当前任务相关的历史记忆，请仅在有帮助时参考，不要擅自篡改其中的事实："
         ]
         for item in items:
-            lines.append(f"- [{item.role}] {item.content}")
+            explanation = self._render_recall_explanation(item)
+            suffix = f" ({explanation})" if explanation else ""
+            lines.append(f"- [{item.role}] {item.content}{suffix}")
         return "\n".join(lines)
 
     def build_structured_memory_sections(
@@ -237,7 +319,9 @@ class MemoryManager:
         }
         for item in items:
             bucket = self._classify_memory_item(item)
-            grouped[bucket].append(f"[{item.role}] {item.content}")
+            explanation = self._render_recall_explanation(item)
+            suffix = f" ({explanation})" if explanation else ""
+            grouped[bucket].append(f"[{item.role}] {item.content}{suffix}")
         return {title: lines for title, lines in grouped.items() if lines}
 
     def build_structured_memory_prompt(
@@ -410,6 +494,61 @@ class MemoryManager:
         if len(compact) <= limit:
             return compact
         return f"{compact[:limit].rstrip()}..."
+
+    def _annotate_recall_source(
+        self,
+        items: List[MemoryItem],
+        *,
+        source: str,
+        query: Optional[str],
+    ) -> List[MemoryItem]:
+        """给召回项补充来源和原因解释。"""
+        annotated: List[MemoryItem] = []
+        for item in items:
+            metadata = dict(item.metadata)
+            existing_sources = list(metadata.get("recall_sources", []))
+            metadata["recall_sources"] = self._merge_recall_sources(existing_sources, [source])
+            metadata["recall_reason"] = self._build_recall_reason(item, source=source, query=query)
+            annotated.append(item.model_copy(update={"metadata": metadata}))
+        return annotated
+
+    @staticmethod
+    def _merge_recall_sources(existing: List[str], extra: List[str]) -> List[str]:
+        merged: List[str] = []
+        for source in [*existing, *extra]:
+            if source and source not in merged:
+                merged.append(source)
+        return merged
+
+    def _build_recall_reason(self, item: MemoryItem, *, source: str, query: Optional[str]) -> str:
+        """根据来源和 metadata 拼出一条简洁的召回解释。"""
+        reason_parts: List[str] = []
+        if source.startswith("semantic"):
+            score = item.metadata.get("semantic_score")
+            if score is not None:
+                reason_parts.append(f"semantic_score={score}")
+        if source.startswith("working"):
+            reason_parts.append("来自近期工作记忆")
+        elif source.startswith("episodic"):
+            reason_parts.append("来自持久化情景记忆")
+        elif source.startswith("semantic"):
+            reason_parts.append("来自语义/图谱召回")
+        if "fallback" in source:
+            reason_parts.append("搜索不足后回退到 recent")
+        if query:
+            reason_parts.append(f"query={self._trim_summary_line(query, limit=24)}")
+        return "; ".join(reason_parts)
+
+    def _render_recall_explanation(self, item: MemoryItem) -> str:
+        """把召回解释压成适合直接显示在 prompt/调试文本里的短说明。"""
+        sources = list(item.metadata.get("recall_sources", []))
+        score = item.metadata.get("semantic_score")
+        parts: List[str] = []
+        if sources:
+            parts.append(f"source={'+'.join(sources)}")
+        if score is not None:
+            parts.append(f"score={score}")
+        return "; ".join(parts)
 
     def _plan_memory_record(
         self,

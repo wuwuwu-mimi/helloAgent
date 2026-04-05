@@ -573,6 +573,7 @@ main.run_demo("native_reflection_smoke")
 - 哪些重复消息会被拦截
 - 哪些内容会进入 working / episodic / semantic
 - 最近的记忆写入决策日志
+- 最近一次召回结果为什么会被选中
 
 在 `tool_schema_smoke` 演示里，会直接看到：
 
@@ -645,6 +646,7 @@ main.run_demo("native_reflection_smoke")
 - 原生 tool calling 已覆盖 `ReactAgent / Plan-and-Solve / Reflection`，并抽成了公共执行层
 - 但 schema 校验、并行工具调用、失败恢复策略还没有补完整
 - 记忆系统当前已经有第一版写入策略、低价值过滤、重复跳过和决策日志
+- 记忆召回当前已经开始带来源和分数解释
 - 但长期保留策略、记忆淘汰和更细的检索解释还没有完全补齐
 - 工具系统目前比较轻量
 - 测试还不够系统化
