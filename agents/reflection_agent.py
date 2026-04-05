@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Any, List, Optional, Tuple
 
-from core import Config, HelloAgentsLLM, Message
+from core import Config, HelloAgentsLLM
 from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 
@@ -245,65 +245,36 @@ class ReflectionAgent(ReactAgent):
         """使用原生 tool calling 生成草稿答案。"""
         local_history: List[str] = []
         grounded_observations: List[str] = []
-        context_packet = self._build_context_packet()
-        rendered_context = context_packet.render(
-            max_chars=self.config.context_max_chars,
-            max_sections=self.config.context_max_sections,
-            section_max_chars=self.config.context_section_max_chars,
+        draft_answer = self._run_native_tool_calling_loop(
+            prompt=NATIVE_REFLECTION_DRAFT_PROMPT.format(question=question),
+            max_rounds=self.max_steps,
+            history_target=local_history,
+            append_current_history=False,
+            history_label_prefix="Draft ",
+            action_label="Draft Action",
+            observation_label="Draft Observation",
+            assistant_metadata_factory=lambda round_index: {
+                "native_tool_calling": True,
+                "stage": "draft",
+                "round": round_index,
+            },
+            tool_metadata_factory=lambda round_index, tool_call: {
+                "native_tool_calling": True,
+                "stage": "draft",
+                "round": round_index,
+            },
+            on_tool_observation=lambda observation, tool_call, round_index: (
+                grounded_observations.append(observation)
+                if tool_call.get("function", {}).get("name")
+                else None
+            ),
+            **kwargs,
         )
-        messages: List[Message] = []
-        if rendered_context:
-            messages.append(
-                Message.system(rendered_context, metadata={"source": "context_engineering"})
-            )
-        messages.append(Message.user(NATIVE_REFLECTION_DRAFT_PROMPT.format(question=question)))
-
-        for step in range(1, self.max_steps + 1):
-            logger.debug("[%s] 原生 tool calling 草稿阶段 step %s / %s", self.name, step, self.max_steps)
-            result = self.llm.chat(
-                messages=messages,
-                stream=False,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                tools=self.tool_registry.get_available_tools(),
-                tool_choice="auto",
-                **kwargs,
-            )
-            assistant_message = self._build_assistant_message_from_result(
-                result,
-                round_index=step,
-                history_target=local_history,
-                append_current_history=False,
-            )
-            messages.append(assistant_message)
-
-            if result.tool_calls:
-                for tool_call in result.tool_calls:
-                    observation = self._execute_native_tool_call(
-                        tool_call,
-                        history_target=local_history,
-                        append_current_history=False,
-                    )
-                    if tool_call.get("function", {}).get("name"):
-                        grounded_observations.append(observation)
-                    messages.append(
-                        Message.tool(
-                            observation,
-                            tool_call_id=tool_call.get("id") or f"draft_tool_call_{step}",
-                            name=tool_call.get("function", {}).get("name"),
-                            metadata={"native_tool_calling": True, "stage": "draft"},
-                        )
-                    )
-                continue
-
-            draft_answer = (result.text or "").strip()
-            if draft_answer:
-                local_history.append(f"Draft Finish: {draft_answer}")
-                self.last_grounded_observations = grounded_observations
-                self.current_history.extend(local_history)
-                return draft_answer
-
-            local_history.append("Draft Observation: Native tool calling returned an empty response.")
+        if draft_answer:
+            local_history.append(f"Draft Finish: {draft_answer}")
+            self.last_grounded_observations = grounded_observations
+            self.current_history.extend(local_history)
+            return draft_answer
 
         fallback = f"Reached max steps ({self.max_steps}) without producing a draft answer."
         local_history.append(f"Draft Fallback: {fallback}")

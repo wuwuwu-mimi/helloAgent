@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agents.agent_base import Agent
-from core import ChatResult, Config, ContextBuilder, HelloAgentsLLM, Message
+from core import ChatResult, Config, ContextBuilder, HelloAgentsLLM, Message, ToolCall, ToolFunction
 from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 
@@ -47,6 +47,7 @@ class ReasoningAgentBase(Agent):
         self.tool_observations: List[Dict[str, str]] = []
         self._rag_context_cache: Dict[str, str] = {}
         self._rag_evidence_cache: Dict[str, List[Dict[str, str]]] = {}
+        self.enable_native_tool_calling = False
 
     def _start_new_run(self, input_text: str) -> None:
         """
@@ -106,6 +107,259 @@ class ReasoningAgentBase(Agent):
             max_tokens=self.config.max_tokens,
             **kwargs,
         )
+
+    def _request_result_with_messages(self, messages: List[Message], **kwargs: Any) -> ChatResult:
+        """
+        使用已经拼装好的消息列表调用 LLM。
+
+        修改说明：原生 tool calling 需要在一轮里不断把 assistant/tool 消息回填到同一段对话中，
+        因此补一个“直接吃消息列表”的公共入口，避免各个 Agent 自己重复写 `llm.chat(...)`。
+        """
+        return self.llm.chat(
+            messages=messages,
+            stream=False,
+            temperature=self.config.temperature,
+            max_tokens=self.config.max_tokens,
+            **kwargs,
+        )
+
+    def _render_context_packet(self) -> str:
+        """把结构化上下文渲染成最终 system prompt 文本。"""
+        context_packet = self._build_context_packet()
+        return context_packet.render(
+            max_chars=self.config.context_max_chars,
+            max_sections=self.config.context_max_sections,
+            section_max_chars=self.config.context_section_max_chars,
+        )
+
+    def _build_context_system_message(
+        self,
+        rendered_context: str,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Message:
+        """把渲染后的结构化上下文包装成 system 消息。"""
+        payload = {"source": "context_engineering"}
+        if metadata:
+            payload.update(metadata)
+        return Message.system(rendered_context, metadata=payload)
+
+    @staticmethod
+    def _build_native_user_message(prompt: str, *, metadata: Optional[Dict[str, Any]] = None) -> Message:
+        """构造原生 tool calling 循环里的 user 消息。"""
+        return Message.user(prompt, metadata=metadata or {})
+
+    def _build_native_tool_message(
+        self,
+        observation: str,
+        *,
+        tool_call_id: str,
+        tool_name: Optional[str],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Message:
+        """把工具执行结果包装成标准 tool message。"""
+        payload = {"native_tool_calling": True}
+        if metadata:
+            payload.update(metadata)
+        return Message.tool(
+            observation,
+            tool_call_id=tool_call_id,
+            name=tool_name,
+            metadata=payload,
+        )
+
+    def _build_native_tool_calling_messages(
+        self,
+        prompt: str,
+        *,
+        user_metadata: Optional[Dict[str, Any]] = None,
+        context_metadata: Optional[Dict[str, Any]] = None,
+    ) -> List[Message]:
+        """构造原生 tool calling 起始消息。"""
+        rendered_context = self._render_context_packet()
+        messages: List[Message] = []
+        if rendered_context:
+            messages.append(
+                self._build_context_system_message(
+                    rendered_context,
+                    metadata=context_metadata,
+                )
+            )
+        messages.append(self._build_native_user_message(prompt, metadata=user_metadata))
+        return messages
+
+    def _append_history_entry(
+        self,
+        entry: str,
+        *,
+        history_target: Optional[List[str]] = None,
+        append_current_history: bool = True,
+    ) -> None:
+        """按需把调试历史写入当前 Agent 历史或局部历史。"""
+        if append_current_history:
+            self.current_history.append(entry)
+        if history_target is not None:
+            history_target.append(entry)
+
+    def _should_use_native_tool_calling(self) -> bool:
+        """判断当前是否启用原生 tool calling。"""
+        mode = (self.config.tool_calling_mode or "text").strip().lower()
+        if mode not in {"native", "auto"}:
+            return False
+        return self.enable_native_tool_calling and bool(self.tool_registry.list_tools())
+
+    def _build_assistant_message_from_result(
+        self,
+        result: ChatResult,
+        *,
+        round_index: int,
+        history_target: Optional[List[str]] = None,
+        append_current_history: bool = True,
+        history_label_prefix: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Message:
+        """把 LLM 返回的文本与 tool_calls 统一转成 assistant 消息。"""
+        tool_calls = [
+            ToolCall(
+                id=item.get("id"),
+                type=item.get("type", "function"),
+                function=ToolFunction(
+                    name=item.get("function", {}).get("name", ""),
+                    arguments=item.get("function", {}).get("arguments", "") or "",
+                ),
+            )
+            for item in (result.tool_calls or [])
+        ]
+        preview_parts: List[str] = []
+        if result.text:
+            preview_parts.append(f"{history_label_prefix}Assistant: {(result.text or '').strip()}")
+        for item in tool_calls:
+            preview_parts.append(
+                f"{history_label_prefix}ToolCall: {item.function.name}[{item.function.arguments}]"
+            )
+        target_entries = preview_parts or [f"{history_label_prefix}Assistant: <empty round {round_index}>"]
+        for entry in target_entries:
+            self._append_history_entry(
+                entry,
+                history_target=history_target,
+                append_current_history=append_current_history,
+            )
+        payload = {"native_tool_calling": True, "round": round_index}
+        if metadata:
+            payload.update(metadata)
+        return Message.assistant(
+            result.text or None,
+            tool_calls=tool_calls,
+            metadata=payload,
+        )
+
+    def _execute_native_tool_call(
+        self,
+        tool_call: Dict[str, Any],
+        *,
+        history_target: Optional[List[str]] = None,
+        append_current_history: bool = True,
+        action_label: str = "Action",
+        observation_label: str = "Observation",
+    ) -> str:
+        """执行一条原生 tool call，并把结果整理成标准 Observation。"""
+        function = tool_call.get("function", {}) or {}
+        tool_name = str(function.get("name", "")).strip()
+        arguments = function.get("arguments", "")
+        self._append_history_entry(
+            f"{action_label}: {tool_name}[{arguments}]",
+            history_target=history_target,
+            append_current_history=append_current_history,
+        )
+        observation = self._handle_action(tool_name, arguments)
+        self._append_history_entry(
+            f"{observation_label}: {observation}",
+            history_target=history_target,
+            append_current_history=append_current_history,
+        )
+        return observation
+
+    def _run_native_tool_calling_loop(
+        self,
+        *,
+        prompt: str,
+        max_rounds: int,
+        history_target: Optional[List[str]] = None,
+        append_current_history: bool = True,
+        history_label_prefix: str = "",
+        action_label: str = "Action",
+        observation_label: str = "Observation",
+        empty_observation_message: str = "Native tool calling returned empty response.",
+        assistant_metadata_factory: Optional[Callable[[int], Dict[str, Any]]] = None,
+        tool_metadata_factory: Optional[Callable[[int, Dict[str, Any]], Dict[str, Any]]] = None,
+        on_assistant_message: Optional[Callable[[Message, ChatResult, int], None]] = None,
+        on_tool_observation: Optional[Callable[[str, Dict[str, Any], int], None]] = None,
+        on_tool_message: Optional[Callable[[Message, Dict[str, Any], str, int], None]] = None,
+        **kwargs: Any,
+    ) -> str:
+        """
+        驱动一段可复用的原生 tool calling 循环。
+
+        修改说明：把“构造消息 -> 请求模型 -> 回填 assistant/tool message -> 执行工具”的主链路
+        下沉到公共父类，React / Plan / Reflection 只保留各自的 prompt、轮次和收尾逻辑。
+        """
+        messages = self._build_native_tool_calling_messages(prompt)
+
+        for round_index in range(1, max_rounds + 1):
+            result = self._request_result_with_messages(
+                messages,
+                tools=self.tool_registry.get_available_tools(),
+                tool_choice="auto",
+                **kwargs,
+            )
+            assistant_message = self._build_assistant_message_from_result(
+                result,
+                round_index=round_index,
+                history_target=history_target,
+                append_current_history=append_current_history,
+                history_label_prefix=history_label_prefix,
+                metadata=assistant_metadata_factory(round_index) if assistant_metadata_factory else None,
+            )
+            messages.append(assistant_message)
+            if on_assistant_message is not None:
+                on_assistant_message(assistant_message, result, round_index)
+
+            if result.tool_calls:
+                for tool_call in result.tool_calls:
+                    observation = self._execute_native_tool_call(
+                        tool_call,
+                        history_target=history_target,
+                        append_current_history=append_current_history,
+                        action_label=action_label,
+                        observation_label=observation_label,
+                    )
+                    if on_tool_observation is not None:
+                        on_tool_observation(observation, tool_call, round_index)
+                    tool_message = self._build_native_tool_message(
+                        observation,
+                        tool_call_id=tool_call.get("id") or f"tool_call_{round_index}",
+                        tool_name=tool_call.get("function", {}).get("name"),
+                        metadata=tool_metadata_factory(round_index, tool_call) if tool_metadata_factory else None,
+                    )
+                    messages.append(tool_message)
+                    if on_tool_message is not None:
+                        on_tool_message(tool_message, tool_call, observation, round_index)
+                continue
+
+            final_text = (result.text or "").strip()
+            if final_text:
+                return final_text
+            self._append_history_entry(
+                f"{observation_label}: {empty_observation_message}",
+                history_target=history_target,
+                append_current_history=append_current_history,
+            )
+
+        return ""
+
+    def _handle_action(self, action_type: str, action_input: Optional[str]) -> str:
+        """子类需要实现具体的工具执行逻辑。"""
+        raise NotImplementedError
 
     def _build_memory_context(self) -> str:
         """读取与当前输入相关的历史记忆，并整理成 prompt 片段。"""

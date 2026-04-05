@@ -5,7 +5,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from core import Config, HelloAgentsLLM, Message
+from core import Config, HelloAgentsLLM
 from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 
@@ -291,86 +291,33 @@ class PlanAndSolveAgent(ReactAgent):
     ) -> str:
         """对单个计划步骤执行原生 tool calling 循环。"""
         step_history: List[str] = []
-        context_packet = self._build_context_packet()
-        rendered_context = context_packet.render(
-            max_chars=self.config.context_max_chars,
-            max_sections=self.config.context_max_sections,
-            section_max_chars=self.config.context_section_max_chars,
+        logger.info("当前步骤 `%s` 进入公共原生 tool calling 求解链路", current_step)
+        final_text = self._run_native_tool_calling_loop(
+            prompt=NATIVE_STEP_TOOL_CALLING_PROMPT.format(
+                question=question,
+                plan=self._render_plan(plan),
+                completed_steps=self._render_completed_steps(completed_steps),
+                current_step=current_step,
+            ),
+            max_rounds=self.max_step_rounds,
+            history_target=step_history,
+            append_current_history=False,
+            assistant_metadata_factory=lambda round_index: {
+                "native_tool_calling": True,
+                "stage": "plan_step",
+                "round": round_index,
+            },
+            tool_metadata_factory=lambda round_index, tool_call: {
+                "native_tool_calling": True,
+                "stage": "plan_step",
+                "round": round_index,
+            },
+            **kwargs,
         )
-        messages = []
-        if rendered_context:
-            messages.append(
-                self._build_context_system_message(rendered_context)
-            )
-        messages.append(
-            self._build_native_user_message(
-                NATIVE_STEP_TOOL_CALLING_PROMPT.format(
-                    question=question,
-                    plan=self._render_plan(plan),
-                    completed_steps=self._render_completed_steps(completed_steps),
-                    current_step=current_step,
-                )
-            )
-        )
-
-        for round_index in range(1, self.max_step_rounds + 1):
-            logger.info("当前步骤 `%s` 第 %s 轮原生 tool calling 求解", current_step, round_index)
-            result = self.llm.chat(
-                messages=messages,
-                stream=False,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                tools=self.tool_registry.get_available_tools(),
-                tool_choice="auto",
-                **kwargs,
-            )
-            assistant_message = self._build_assistant_message_from_result(
-                result,
-                round_index=round_index,
-                history_target=step_history,
-                append_current_history=False,
-            )
-            messages.append(assistant_message)
-
-            if result.tool_calls:
-                for tool_call in result.tool_calls:
-                    observation = self._execute_native_tool_call(
-                        tool_call,
-                        history_target=step_history,
-                        append_current_history=False,
-                    )
-                    messages.append(
-                        self._build_native_tool_message(
-                            observation,
-                            tool_call_id=tool_call.get("id") or f"step_tool_call_{round_index}",
-                            tool_name=tool_call.get("function", {}).get("name"),
-                        )
-                    )
-                continue
-
-            final_text = (result.text or "").strip()
-            if final_text:
-                return final_text
-            step_history.append("Observation: Native tool calling returned empty response.")
+        if final_text:
+            return final_text
 
         return f"Step unfinished after {self.max_step_rounds} rounds: {current_step}"
-
-    @staticmethod
-    def _build_context_system_message(rendered_context: str):
-        return Message.system(rendered_context, metadata={"source": "context_engineering"})
-
-    @staticmethod
-    def _build_native_user_message(prompt: str):
-        return Message.user(prompt)
-
-    @staticmethod
-    def _build_native_tool_message(observation: str, *, tool_call_id: str, tool_name: str | None):
-        return Message.tool(
-            observation,
-            tool_call_id=tool_call_id,
-            name=tool_name,
-            metadata={"native_tool_calling": True},
-        )
 
     def _generate_final_answer(
         self,

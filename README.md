@@ -572,18 +572,21 @@ main.run_demo("native_reflection_smoke")
 - 模型返回的 `tool_calls`
 - 工具被执行后的 Observation
 - tool message 回填后生成的最终答案
+- 公共 native tool calling 执行层是如何驱动整段循环的
 
 在 `native_plan_smoke` 演示里，会直接看到：
 
 - 文本规划输出
 - 原生 tool calling 驱动的步骤求解
 - 步骤结果再被汇总成最终答案
+- `PlanAndSolveAgent` 复用公共 assistant/tool 回填链路后的执行结果
 
 在 `native_reflection_smoke` 演示里，会直接看到：
 
 - 草稿阶段的原生 `tool_calls`
 - 工具结果如何成为草稿答案依据
 - 反思阶段继续沿用现有文本审查链路
+- `ReflectionAgent` 复用公共 native tool loop 后的草稿执行轨迹
 
 如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
@@ -610,7 +613,8 @@ main.run_demo("native_reflection_smoke")
 
 - 仍然偏学习 / 实验用途，不是生产框架
 - schema 和原生 tool calling 还没有完全接上
-- 原生 tool calling 当前已经接到 `ReactAgent`，并部分扩到 `Plan-and-Solve / Reflection`
+- 原生 tool calling 已覆盖 `ReactAgent / Plan-and-Solve / Reflection`，并抽成了公共执行层
+- 但 schema 校验、并行工具调用、失败恢复策略还没有补完整
 - 工具系统目前比较轻量
 - 测试还不够系统化
 - 上下文工程目前还是轻量版，虽然已经有字符预算与去重，但还没有做真正的 token 预算

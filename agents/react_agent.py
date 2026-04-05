@@ -5,7 +5,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from core import Config, HelloAgentsLLM, Message, ToolCall, ToolFunction
+from core import Config, HelloAgentsLLM, Message
 from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 from tools.builtin.tool_base import Tool
@@ -153,58 +153,25 @@ class ReactAgent(ReasoningAgentBase):
         修改说明：这里不再依赖文本 `Thought / Action` 解析，
         而是直接复用工具 schema，让模型通过标准 `tool_calls` 返回调用意图。
         """
-        context_packet = self._build_context_packet()
-        rendered_context = context_packet.render(
-            max_chars=self.config.context_max_chars,
-            max_sections=self.config.context_max_sections,
-            section_max_chars=self.config.context_section_max_chars,
+        logger.info("[%s] 开始原生 tool calling 循环。", self.name)
+        final_answer = self._run_native_tool_calling_loop(
+            prompt=NATIVE_TOOL_CALLING_PROMPT.format(question=question),
+            max_rounds=self.max_steps,
+            on_assistant_message=lambda message, result, round_index: self.add_message(message),
+            tool_metadata_factory=lambda round_index, tool_call: {
+                "native_tool_calling": True,
+                "round": round_index,
+            },
+            on_tool_message=lambda message, tool_call, observation, round_index: self._remember_message(message),
+            **kwargs,
         )
-        messages: List[Message] = []
-        if rendered_context:
-            messages.append(
-                Message.system(rendered_context, metadata={"source": "context_engineering"})
+        if final_answer:
+            self._remember_assistant_text(
+                final_answer,
+                metadata={"memory_stage": "native_tool_calling_finish"},
             )
-        messages.append(Message.user(NATIVE_TOOL_CALLING_PROMPT.format(question=question)))
-
-        for round_index in range(1, self.max_steps + 1):
-            logger.info("[native round %s] 开始调用模型", round_index)
-            result = self.llm.chat(
-                messages=messages,
-                stream=False,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                tools=self.tool_registry.get_available_tools(),
-                tool_choice="auto",
-                **kwargs,
-            )
-
-            assistant_message = self._build_assistant_message_from_result(result, round_index=round_index)
-            messages.append(assistant_message)
-            self.add_message(assistant_message)
-
-            if result.tool_calls:
-                for tool_call in result.tool_calls:
-                    observation = self._execute_native_tool_call(tool_call)
-                    tool_message = Message.tool(
-                        observation,
-                        tool_call_id=tool_call.get("id") or f"tool_call_{round_index}",
-                        name=tool_call.get("function", {}).get("name"),
-                        metadata={"native_tool_calling": True, "round": round_index},
-                    )
-                    messages.append(tool_message)
-                    self._remember_message(tool_message)
-                continue
-
-            final_answer = (result.text or "").strip()
-            if final_answer:
-                self._remember_assistant_text(
-                    final_answer,
-                    metadata={"memory_stage": "native_tool_calling_finish"},
-                )
-                logger.info("[native round %s] 任务完成。", round_index)
-                return final_answer
-
-            self.current_history.append("Observation: Native tool calling returned empty response.")
+            logger.info("[%s] 原生 tool calling 任务完成。", self.name)
+            return final_answer
 
         fallback = f"Reached max steps ({self.max_steps}) without final answer in native tool calling mode."
         self._remember_assistant_text(
@@ -213,74 +180,6 @@ class ReactAgent(ReasoningAgentBase):
         )
         logger.warning("[%s] %s", self.name, fallback)
         return fallback
-
-    def _should_use_native_tool_calling(self) -> bool:
-        """判断当前是否启用原生 tool calling。"""
-        mode = (self.config.tool_calling_mode or "text").strip().lower()
-        if mode not in {"native", "auto"}:
-            return False
-        return self.enable_native_tool_calling and bool(self.tool_registry.list_tools())
-
-    def _build_assistant_message_from_result(
-        self,
-        result: Any,
-        *,
-        round_index: int,
-        history_target: Optional[List[str]] = None,
-        append_current_history: bool = True,
-    ) -> Message:
-        """把 LLM 返回的 tool_calls / text 结果转成统一的 assistant 消息。"""
-        tool_calls = [
-            ToolCall(
-                id=item.get("id"),
-                type=item.get("type", "function"),
-                function=ToolFunction(
-                    name=item.get("function", {}).get("name", ""),
-                    arguments=item.get("function", {}).get("arguments", "") or "",
-                ),
-            )
-            for item in result.tool_calls
-        ]
-        preview_parts: List[str] = []
-        if result.text:
-            preview_parts.append(f"Assistant: {(result.text or '').strip()}")
-        for item in tool_calls:
-            preview_parts.append(
-                f"ToolCall: {item.function.name}[{item.function.arguments}]"
-            )
-        target_entries = preview_parts or [f"Assistant: <empty round {round_index}>"]
-        if append_current_history:
-            self.current_history.extend(target_entries)
-        if history_target is not None:
-            history_target.extend(target_entries)
-        return Message.assistant(
-            result.text or None,
-            tool_calls=tool_calls,
-            metadata={"native_tool_calling": True, "round": round_index},
-        )
-
-    def _execute_native_tool_call(
-        self,
-        tool_call: Dict[str, Any],
-        *,
-        history_target: Optional[List[str]] = None,
-        append_current_history: bool = True,
-    ) -> str:
-        """执行一条原生 tool call，并生成对应的工具返回。"""
-        function = tool_call.get("function", {}) or {}
-        tool_name = str(function.get("name", "")).strip()
-        arguments = function.get("arguments", "")
-        action_line = f"Action: {tool_name}[{arguments}]"
-        if append_current_history:
-            self.current_history.append(action_line)
-        if history_target is not None:
-            history_target.append(action_line)
-        observation = self._handle_action(tool_name, arguments)
-        if append_current_history:
-            self._append_observation(observation)
-        elif history_target is not None:
-            history_target.append(f"Observation: {observation}")
-        return observation
 
     def _build_prompt(self, question: str) -> str:
         """把工具说明、问题和历史 Thought/Action/Observation 拼成最终提示词。"""
