@@ -15,6 +15,34 @@ from memory.types.working import WorkingMemory
 class MemoryManager:
     """统一协调工作记忆与情景记忆。"""
 
+    _PREFERENCE_MARKERS = (
+        "喜欢",
+        "不喜欢",
+        "偏好",
+        "习惯",
+        "爱喝",
+        "爱吃",
+        "讨厌",
+        "prefer",
+        "like",
+        "dislike",
+        "favorite",
+    )
+    _FACT_MARKERS = (
+        "支持",
+        "包含",
+        "项目",
+        "系统",
+        "能力",
+        "功能",
+        "helloagent",
+        "react",
+        "plan-and-solve",
+        "reflection",
+        "rag",
+        "记忆系统",
+    )
+
     def __init__(self, config: Optional[MemoryConfig] = None) -> None:
         self.config = config or MemoryConfig()
         self.embedding_service = EmbeddingServiceFactory.create(self.config)
@@ -136,6 +164,58 @@ class MemoryManager:
             lines.append(f"- [{item.role}] {item.content}")
         return "\n".join(lines)
 
+    def build_structured_memory_sections(
+        self,
+        *,
+        session_id: str,
+        query: Optional[str] = None,
+        exclude_text: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, List[str]]:
+        """
+        把召回到的记忆整理成更适合上下文工程使用的分组结构。
+
+        修改说明：相比单纯把历史记忆直接平铺出来，
+        这里会先粗分成“用户偏好 / 项目事实 / 近期对话”，让模型更容易抓住重点。
+        """
+        items = self.recall(
+            session_id=session_id,
+            query=query,
+            limit=limit or self.config.max_prompt_memories,
+            exclude_text=exclude_text,
+        )
+        grouped: Dict[str, List[str]] = {
+            "用户偏好": [],
+            "项目事实": [],
+            "近期对话": [],
+        }
+        for item in items:
+            bucket = self._classify_memory_item(item)
+            grouped[bucket].append(f"[{item.role}] {item.content}")
+        return {title: lines for title, lines in grouped.items() if lines}
+
+    def build_structured_memory_prompt(
+        self,
+        *,
+        session_id: str,
+        query: Optional[str] = None,
+        exclude_text: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> str:
+        """把结构化记忆分组渲染成单段文本，便于工具或调试直接展示。"""
+        sections = self.build_structured_memory_sections(
+            session_id=session_id,
+            query=query,
+            exclude_text=exclude_text,
+            limit=limit,
+        )
+        if not sections:
+            return ""
+        blocks: List[str] = []
+        for title, lines in sections.items():
+            blocks.append(f"{title}：\n" + "\n".join(f"- {line}" for line in lines))
+        return "\n\n".join(blocks)
+
     def clear_session(self, session_id: str) -> None:
         """清空某个 session 的全部记忆。"""
         self.working_memory.clear(session_id)
@@ -161,3 +241,13 @@ class MemoryManager:
             seen.add(key)
             deduped.append(item)
         return deduped[-limit:]
+
+    @classmethod
+    def _classify_memory_item(cls, item: MemoryItem) -> str:
+        """根据内容做一个轻量分组，便于后续上下文路由。"""
+        content = item.content.strip().lower()
+        if any(marker in content for marker in cls._PREFERENCE_MARKERS):
+            return "用户偏好"
+        if any(marker in content for marker in cls._FACT_MARKERS):
+            return "项目事实"
+        return "近期对话"

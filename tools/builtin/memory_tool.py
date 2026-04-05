@@ -22,6 +22,7 @@ class MemoryTool(Tool):
         支持四种动作：
         - recent: 查看最近记忆
         - search: 按 query 搜索记忆
+        - context: 返回结构化记忆上下文
         - remember: 手动写入一条记忆
         - clear: 清空当前会话记忆
         """
@@ -40,6 +41,16 @@ class MemoryTool(Tool):
                 limit=limit,
             )
             return self._format_items(items)
+
+        if action == "context":
+            query = str(parameters.get("query", "")).strip()
+            rendered = self.memory_manager.build_structured_memory_prompt(
+                session_id=self.session_id,
+                query=query or None,
+                exclude_text=query or None,
+                limit=limit,
+            )
+            return rendered or "没有找到相关记忆。"
 
         if action == "remember":
             content = str(parameters.get("content", "")).strip()
@@ -64,7 +75,7 @@ class MemoryTool(Tool):
             ToolParameter(
                 name="action",
                 type="string",
-                description="动作类型，可选 recent/search/remember/clear。",
+                description="动作类型，可选 recent/search/context/remember/clear。",
             ),
             ToolParameter(
                 name="query",

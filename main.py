@@ -422,6 +422,58 @@ def test_context_engineering_smoke() -> None:
     print(rendered or "(没有生成上下文)")
 
 
+def test_context_routing_smoke() -> None:
+    """
+    运行一个上下文路由冒烟测试。
+
+    修改说明：分别构造“偏记忆”和“偏知识检索”两类问题，
+    方便直接观察路由策略是否会调整 memory / rag 的上下文优先级。
+    """
+    memory_manager = build_memory_manager()
+    session_id = "context_routing_smoke"
+    memory_manager.clear_session(session_id)
+    memory_manager.record_message(
+        session_id=session_id,
+        role="user",
+        content="我喜欢美式咖啡，不喜欢过甜饮品。",
+    )
+    memory_manager.record_message(
+        session_id=session_id,
+        role="assistant",
+        content="helloAgent 当前支持 ReAct、Plan-and-Solve、Reflection。",
+    )
+
+    rag_pipeline = build_rag_pipeline(memory_manager)
+    rag_pipeline.add_document(str(ensure_demo_rag_document()))
+    registry = build_tool_registry(memory_manager, session_id, rag_pipeline)
+
+    agent = ReactAgent(
+        name="context_routing_smoke",
+        llm=object(),  # type: ignore[arg-type]
+        tool_registry=registry,
+        config=Config.from_env(),
+        max_steps=1,
+        memory_manager=memory_manager,
+        session_id=session_id,
+    )
+
+    questions = [
+        "你还记得我的饮品偏好吗？",
+        "helloAgent 当前支持哪些 Agent 范式？请根据文档回答。",
+    ]
+    for question in questions:
+        agent._start_new_run(question)
+        rendered = agent._build_context_packet().render(
+            max_chars=agent.config.context_max_chars,
+            max_sections=agent.config.context_max_sections,
+            section_max_chars=agent.config.context_section_max_chars,
+        )
+        print("\n" + "=" * 24)
+        print(f"上下文路由测试: {question}")
+        print("=" * 24)
+        print(rendered or "(没有生成上下文)")
+
+
 def run_demo(target: str = "reflection") -> None:
     """根据名称运行指定的示例，方便你在一个入口里切换不同 Agent。"""
     demos = {
@@ -433,6 +485,7 @@ def run_demo(target: str = "reflection") -> None:
         "rag_smoke": test_rag_pipeline_smoke,
         "embedding_smoke": test_embedding_smoke,
         "context_smoke": test_context_engineering_smoke,
+        "routing_smoke": test_context_routing_smoke,
     }
     if target not in demos:
         raise ValueError(f"不支持的测试目标: {target}，可选值: {', '.join(demos)}")

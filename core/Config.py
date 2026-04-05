@@ -76,6 +76,8 @@ class Config(BaseModel):
     context_max_chars: int = 3200
     context_max_sections: int = 6
     context_section_max_chars: int = 1200
+    auto_memory_context: bool = True
+    auto_memory_context_limit: int = 5
     auto_rag_context: bool = True
     auto_rag_context_limit: int = 3
     tool_context_observation_limit: int = 4
@@ -105,6 +107,14 @@ class Config(BaseModel):
             context_section_max_chars=_read_int(
                 defaults.context_section_max_chars,
                 "CONTEXT_SECTION_MAX_CHARS",
+            ),
+            auto_memory_context=_read_bool(
+                defaults.auto_memory_context,
+                "AUTO_MEMORY_CONTEXT",
+            ),
+            auto_memory_context_limit=_read_int(
+                defaults.auto_memory_context_limit,
+                "AUTO_MEMORY_CONTEXT_LIMIT",
             ),
             auto_rag_context=_read_bool(defaults.auto_rag_context, "AUTO_RAG_CONTEXT"),
             auto_rag_context_limit=_read_int(

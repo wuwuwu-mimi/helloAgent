@@ -99,7 +99,7 @@ Action: get_time[]
 - `EpisodicMemory`：基于 SQLite / JSON fallback 的持久化记忆
 - `SemanticMemory`：基于“向量检索 + 图谱检索”的双通道语义记忆
 - `MemoryManager`：统一协调写入、召回、去重和 prompt 注入
-- `memory_tool`：支持 `recent / search / remember / clear`
+- `memory_tool`：支持 `recent / search / context / remember / clear`
 
 当前这套语义检索已经开始兼容真实 Qdrant + Neo4j，当前阶段可以做到：
 
@@ -113,6 +113,10 @@ Action: get_time[]
   - 用户偏好：如“用户喜欢美式咖啡 / 不喜欢过甜饮品”
   - 能力支持：如“helloAgent 支持 ReAct / Plan-and-Solve / Reflection”
   - 系统组成：如“记忆系统包含 WorkingMemory / EpisodicMemory / SemanticMemory”
+- 记忆召回结果已经开始做轻量结构化整理，当前会优先分成：
+  - `用户偏好`
+  - `项目事实`
+  - `近期对话`
 
 后续还会继续往这些方向补：
 
@@ -150,6 +154,25 @@ Action: get_time[]
 - 如果当前注册了 `rag_tool`，并且本地已经有可检索文档，`ReasoningAgentBase` 会在发起推理前自动补一层 `RAG context`
 - 当前运行中已经执行过的工具 Observation，也会被提炼成高优先级 section，再次注入后续轮次
 - 这样 `ReAct / Plan-and-Solve / Reflection` 三种范式都能共享同一套“记忆 + 检索 + 工具事实”的上下文拼装逻辑
+
+现在这层还多了一步“轻量上下文路由”：
+
+- 偏个性化 / 偏回忆的问题，会走 `memory_first`
+- 偏文档问答 / 偏知识检索的问题，会走 `rag_first`
+- 偏工具执行的问题，会走 `tool_first`
+- 其他情况走 `balanced`
+
+在 `memory_first` 路由下，系统会更强调：
+
+- 用户偏好
+- 项目事实
+- 近期对话摘要
+
+在 `rag_first` 路由下，系统会更强调：
+
+- 自动 RAG 检索结果
+- 证据片段
+- 与当前问题直接相关的少量记忆
 
 ## 当前的 embedding 进展
 
@@ -314,6 +337,8 @@ QDRANT_RAG_COLLECTION=rag_chunks_bge_m3
 CONTEXT_MAX_CHARS=3200
 CONTEXT_MAX_SECTIONS=6
 CONTEXT_SECTION_MAX_CHARS=1200
+AUTO_MEMORY_CONTEXT=true
+AUTO_MEMORY_CONTEXT_LIMIT=5
 AUTO_RAG_CONTEXT=true
 AUTO_RAG_CONTEXT_LIMIT=3
 TOOL_CONTEXT_OBSERVATION_LIMIT=4
@@ -381,6 +406,15 @@ main.configure_logging()
 main.run_demo("context_smoke")
 ```
 
+如果你想进一步看“不同问题类型会如何切换上下文优先级”，可以执行：
+
+```python
+import main
+
+main.configure_logging()
+main.run_demo("routing_smoke")
+```
+
 如果配置正确，终端会输出：
 
 - 最终答案
@@ -416,6 +450,12 @@ main.run_demo("context_smoke")
 - 召回到的历史记忆
 - 自动注入的 RAG 检索上下文
 
+在 `routing_smoke` 演示里，会直接看到：
+
+- 当前命中的上下文路由类型
+- memory / rag / tool 三类上下文的优先级
+- 同一个 Agent 在“偏回忆问题”和“偏文档问题”下的不同拼装结果
+
 如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
 ## 当前支持的 Provider 方向
@@ -445,6 +485,7 @@ main.run_demo("context_smoke")
 - 测试还不够系统化
 - 上下文工程目前还是轻量版，虽然已经有字符预算与去重，但还没有做真正的 token 预算
 - 自动 RAG 注入目前还是启发式触发，不是完整的 query planner
+- memory / rag / tool 的上下文路由目前也是启发式规则，不是训练得到的策略模型
 - 文档会继续补充，目录结构也可能继续调整
 
 ## 接下来准备继续做的事情

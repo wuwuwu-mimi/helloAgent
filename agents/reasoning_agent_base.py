@@ -93,30 +93,93 @@ class ReasoningAgentBase(Agent):
 
     def _build_context_packet(self):
         """构建本轮请求的结构化上下文。"""
+        route = self._resolve_context_route(self.current_input)
         builder = ContextBuilder()
         if self.system_prompt:
             builder.add_system_prompt(self.system_prompt)
+        builder.add_notes(
+            "上下文策略",
+            (
+                f"当前判定的上下文路由: {route['route_name']}。\n"
+                f"优先级顺序: 工具观察={route['tool_priority']} / 记忆={route['memory_priority']} / 检索={route['rag_priority']}。"
+            ),
+            priority=96,
+            source="context_router",
+        )
         builder.add_runtime_rules(
             [
                 "优先遵守工具事实和显式上下文，不要编造未观察到的信息。",
                 "如果历史记忆或检索上下文不足以支持结论，应明确说明不确定性。",
             ]
         )
-        memory_context = self._build_memory_context()
-        if memory_context:
-            builder.add_memory(memory_context)
+        for section in self._build_auto_memory_sections(route):
+            builder.add_notes(
+                section["title"],
+                section["content"],
+                priority=section["priority"],
+                source="memory",
+            )
         tool_context = self._build_tool_observation_context()
         if tool_context:
             builder.add_notes(
                 "工具观察",
                 tool_context,
-                priority=85,
+                priority=route["tool_priority"],
                 source="tool_observation",
             )
-        rag_context = self._build_auto_rag_context()
+        rag_context = self._build_auto_rag_context(route)
         if rag_context:
-            builder.add_retrieval(rag_context)
+            builder.add_notes(
+                "检索上下文",
+                rag_context,
+                priority=route["rag_priority"],
+                source="retrieval",
+            )
         return builder.build()
+
+    def _build_auto_memory_sections(self, route: Dict[str, int | str | bool]) -> List[Dict[str, int | str]]:
+        """按当前路由策略生成结构化记忆 section。"""
+        if self.memory_manager is None:
+            return []
+
+        if not self.config.auto_memory_context:
+            memory_context = self._build_memory_context()
+            if not memory_context:
+                return []
+            return [
+                {
+                    "title": "相关记忆",
+                    "content": memory_context,
+                    "priority": int(route["memory_priority"]),
+                }
+            ]
+
+        sections = self.memory_manager.build_structured_memory_sections(
+            session_id=self.session_id,
+            query=self.current_input,
+            exclude_text=self.current_input,
+            limit=int(route["memory_limit"]),
+        )
+        if not sections:
+            return []
+
+        title_offsets = {
+            "用户偏好": 3,
+            "项目事实": 2,
+            "近期对话": 1,
+        }
+        rendered_sections: List[Dict[str, int | str]] = []
+        base_priority = int(route["memory_priority"])
+        for title, lines in sections.items():
+            body = "\n".join(f"- {line}" for line in lines)
+            rendered_sections.append(
+                {
+                    "title": title,
+                    "content": body,
+                    "priority": base_priority + title_offsets.get(title, 0),
+                }
+            )
+        return rendered_sections
 
     def _build_tool_observation_context(self) -> str:
         """把当前运行过程中已经确认过的工具观察整理成高优先级上下文。"""
@@ -129,7 +192,7 @@ class ReasoningAgentBase(Agent):
             lines.append(f"{index}. [{item['tool']}] {item['observation']}")
         return "\n".join(lines)
 
-    def _build_auto_rag_context(self) -> str:
+    def _build_auto_rag_context(self, route: Dict[str, int | str | bool]) -> str:
         """
         自动从 rag_tool 拉取与当前问题相关的检索上下文。
 
@@ -139,7 +202,7 @@ class ReasoningAgentBase(Agent):
         if not self.config.auto_rag_context:
             return ""
         query = self.current_input.strip()
-        if not query or not self._should_use_auto_rag(query):
+        if not query or not self._should_use_auto_rag(query, route):
             return ""
         if query in self._rag_context_cache:
             return self._rag_context_cache[query]
@@ -155,7 +218,7 @@ class ReasoningAgentBase(Agent):
                 return ""
             matches = rag_tool.rag_pipeline.search(
                 query,
-                limit=self.config.auto_rag_context_limit,
+                limit=int(route["rag_limit"]),
             )
         except Exception:
             matches = []
@@ -179,7 +242,7 @@ class ReasoningAgentBase(Agent):
         return context
 
     @staticmethod
-    def _should_use_auto_rag(query: str) -> bool:
+    def _should_use_auto_rag(query: str, route: Dict[str, int | str | bool]) -> bool:
         """
         粗略判断当前输入是否适合做自动检索。
 
@@ -199,7 +262,101 @@ class ReasoningAgentBase(Agent):
             "rag_tool add",
             "rag_tool clear",
         )
+        if bool(route.get("prefer_memory")) and not bool(route.get("prefer_rag")):
+            return False
         return not any(keyword in normalized for keyword in skip_keywords)
+
+    def _resolve_context_route(self, query: str) -> Dict[str, int | str | bool]:
+        """
+        为当前问题选择一个轻量上下文路由策略。
+
+        修改说明：当前先用启发式路由把问题粗分成“记忆优先 / 检索优先 / 工具优先 / 平衡”，
+        后面如果做更复杂的 planner，也可以直接替换这一层。
+        """
+        normalized = query.strip().lower()
+        memory_keywords = (
+            "记得",
+            "还记得",
+            "我的",
+            "我喜欢",
+            "偏好",
+            "习惯",
+            "名字",
+            "刚才",
+            "之前",
+            "preference",
+            "remember",
+            "profile",
+        )
+        rag_keywords = (
+            "文档",
+            "资料",
+            "根据文档",
+            "项目",
+            "系统",
+            "支持哪些",
+            "知识库",
+            "rag",
+            "介绍一下",
+            "说明",
+        )
+        tool_keywords = (
+            "调用",
+            "工具",
+            "get_time",
+            "当前时间",
+            "本地时间",
+            "执行",
+            "查询",
+            "计算",
+        )
+
+        if any(keyword in normalized for keyword in tool_keywords):
+            route_name = "tool_first"
+            return {
+                "route_name": route_name,
+                "memory_priority": 76,
+                "tool_priority": 92,
+                "rag_priority": 68,
+                "memory_limit": self.config.auto_memory_context_limit,
+                "rag_limit": max(1, self.config.auto_rag_context_limit - 1),
+                "prefer_memory": False,
+                "prefer_rag": False,
+            }
+        if any(keyword in normalized for keyword in memory_keywords):
+            route_name = "memory_first"
+            return {
+                "route_name": route_name,
+                "memory_priority": 88,
+                "tool_priority": 82,
+                "rag_priority": 62,
+                "memory_limit": self.config.auto_memory_context_limit + 1,
+                "rag_limit": max(1, self.config.auto_rag_context_limit - 1),
+                "prefer_memory": True,
+                "prefer_rag": False,
+            }
+        if any(keyword in normalized for keyword in rag_keywords):
+            route_name = "rag_first"
+            return {
+                "route_name": route_name,
+                "memory_priority": 74,
+                "tool_priority": 82,
+                "rag_priority": 88,
+                "memory_limit": max(2, self.config.auto_memory_context_limit - 1),
+                "rag_limit": self.config.auto_rag_context_limit + 1,
+                "prefer_memory": False,
+                "prefer_rag": True,
+            }
+        return {
+            "route_name": "balanced",
+            "memory_priority": 80,
+            "tool_priority": 85,
+            "rag_priority": 78,
+            "memory_limit": self.config.auto_memory_context_limit,
+            "rag_limit": self.config.auto_rag_context_limit,
+            "prefer_memory": False,
+            "prefer_rag": True,
+        }
 
     def _remember_tool_observation(self, tool_name: str, observation: str) -> None:
         """记录本轮工具观察，供上下文工程优先注入。"""
