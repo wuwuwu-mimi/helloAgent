@@ -19,4 +19,3 @@ data/
 tmp_utf8*.txt
 simple_sqlite_test.db
 simple_sqlite_test.db-journal
-memory.md
