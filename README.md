@@ -21,9 +21,11 @@
 - 一个工具注册器 `ToolRegistry`
 - 一个内置示例工具 `get_time`
 - 一个内置记忆工具 `memory_tool`
+- 一个内置检索工具 `rag_tool`
 - 一个统一的 OpenAI-compatible LLM 调用层
 - 一个本地可运行的离线 embedding 实现
 - 一个 Qdrant 风格的本地向量存储适配层（当前先用 JSON 落盘）
+- 一个最小可用的本地 RAG pipeline（文档切片 / 索引 / 检索）
 - 一个 `main.py` 演示入口
 
 ## 当前支持的 Agent 范式
@@ -106,8 +108,8 @@ Action: get_time[]
 
 - 真正的 Qdrant 服务接入
 - Neo4j 图谱记忆
-- 更完整的 RAG pipeline
-- `rag_tool`
+- 更多文档格式解析
+- 基于检索结果的自动答案合成 / 重排
 
 ## 项目结构
 
@@ -130,13 +132,14 @@ helloAgent/
 │  ├─ embedding.py             # 离线 embedding / 向量相似度能力
 │  ├─ types/                   # 各类记忆实现
 │  ├─ storage/                 # SQLite / 向量存储适配
-│  └─ rag/                     # 预留给后续 RAG 能力
+│  └─ rag/                     # 本地 RAG 管道与文档处理
 ├─ tools/
 │  └─ builtin/
 │     ├─ tool_base.py          # 工具基类
 │     ├─ toolRegistry.py       # 工具注册器
 │     ├─ get_time.py           # 示例工具：获取本地时间
-│     └─ memory_tool.py        # 记忆工具
+│     ├─ memory_tool.py        # 记忆工具
+│     └─ rag_tool.py           # 本地检索工具
 ├─ main.py                     # 当前测试入口
 ├─ README.md
 └─ LICENSE
@@ -211,12 +214,27 @@ python main.py
 
 当前 `main.py` 默认运行的是“记忆测试工作流”。
 
+如果你想验证本地 RAG 链路，可以在 Python 里手动执行：
+
+```python
+import main
+
+main.configure_logging()
+main.run_demo("rag")
+```
+
 如果配置正确，终端会输出：
 
 - 最终答案
 - 执行轨迹
 - 记忆快照
 - 更干净的运行日志
+
+在 `rag` 演示里，还会额外看到：
+
+- 本地示例文档建索引
+- `rag_tool` 的检索结果
+- 基于检索上下文生成的最终回答
 
 如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
@@ -256,7 +274,7 @@ python main.py
 - 更完整的公共 Agent 抽象
 - 更稳定的多轮消息管理
 - 更完善的测试和示例
-- 可能加入 memory / planning / RAG 等能力
+- 更真实的向量库 / 图数据库接入
 
 ## 为什么公开这个仓库
 

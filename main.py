@@ -1,12 +1,15 @@
 import logging
+from pathlib import Path
 
 from agents.plan_and_solve import PlanAndSolveAgent
 from agents.react_agent import ReactAgent
 from agents.reflection_agent import ReflectionAgent
 from core import Config, HelloAgentsLLM
 from memory import MemoryConfig, MemoryManager
+from memory.rag import RagPipeline
 from tools.builtin.get_time import GetTimeTool
 from tools.builtin.memory_tool import MemoryTool
+from tools.builtin.rag_tool import RagTool
 from tools.builtin.toolRegistry import ToolRegistry
 
 
@@ -39,22 +42,41 @@ def build_memory_manager() -> MemoryManager:
     """
     创建默认的记忆管理器。
 
-    修改说明：当前先使用“工作记忆 + SQLite 情景记忆”的最小实现，
-    后续如果要切到向量库或图数据库，可以在这里统一替换。
+    修改说明：当前已经包含“工作记忆 + 情景记忆 + 最小语义记忆”，
+    后续如果要切到真实 Qdrant / Neo4j，可以继续在这里统一替换。
     """
     return MemoryManager(MemoryConfig())
 
 
-def build_tool_registry(memory_manager: MemoryManager, session_id: str) -> ToolRegistry:
+def build_rag_pipeline(memory_manager: MemoryManager) -> RagPipeline:
+    """
+    创建默认的 RAG 管道。
+
+    修改说明：RAG 先复用记忆系统里的 embedding 配置，
+    这样记忆检索和文档检索在同一个项目里保持一致的向量表示方式。
+    """
+    return RagPipeline(
+        config=memory_manager.config,
+        embedding_service=memory_manager.embedding_service,
+    )
+
+
+def build_tool_registry(
+    memory_manager: MemoryManager,
+    session_id: str,
+    rag_pipeline: RagPipeline | None = None,
+) -> ToolRegistry:
     """
     创建当前示例使用的工具注册表。
 
     修改说明：工具注册表现在不仅包含 `get_time`，
-    还会注入 `memory_tool`，方便 Agent 显式读取或写入会话记忆。
+    还会注入 `memory_tool` 和 `rag_tool`，方便 Agent 显式读取记忆或检索本地文档。
     """
     registry = ToolRegistry()
     registry.register_tool(GetTimeTool())
     registry.register_tool(MemoryTool(memory_manager=memory_manager, session_id=session_id))
+    if rag_pipeline is not None:
+        registry.register_tool(RagTool(rag_pipeline=rag_pipeline))
     return registry
 
 
@@ -73,10 +95,11 @@ def build_react_agent() -> ReactAgent:
     """构造一个可直接运行的 ReAct Agent。"""
     llm, config = _build_llm_and_config()
     memory_manager = build_memory_manager()
+    rag_pipeline = build_rag_pipeline(memory_manager)
     return ReactAgent(
         name="react_agent",
         llm=llm,
-        tool_registry=build_tool_registry(memory_manager, "react_agent"),
+        tool_registry=build_tool_registry(memory_manager, "react_agent", rag_pipeline),
         config=config,
         max_steps=5,
         memory_manager=memory_manager,
@@ -88,10 +111,11 @@ def build_plan_and_solve_agent() -> PlanAndSolveAgent:
     """构造一个可直接运行的 Plan-and-Solve Agent。"""
     llm, config = _build_llm_and_config()
     memory_manager = build_memory_manager()
+    rag_pipeline = build_rag_pipeline(memory_manager)
     return PlanAndSolveAgent(
         name="plan_and_solve_agent",
         llm=llm,
-        tool_registry=build_tool_registry(memory_manager, "plan_and_solve_agent"),
+        tool_registry=build_tool_registry(memory_manager, "plan_and_solve_agent", rag_pipeline),
         config=config,
         max_steps=5,
         max_step_rounds=4,
@@ -104,10 +128,11 @@ def build_reflection_agent() -> ReflectionAgent:
     """构造一个可直接运行的 Reflection Agent。"""
     llm, config = _build_llm_and_config()
     memory_manager = build_memory_manager()
+    rag_pipeline = build_rag_pipeline(memory_manager)
     return ReflectionAgent(
         name="reflection_agent",
         llm=llm,
-        tool_registry=build_tool_registry(memory_manager, "reflection_agent"),
+        tool_registry=build_tool_registry(memory_manager, "reflection_agent", rag_pipeline),
         config=config,
         max_steps=5,
         max_reflections=2,
@@ -175,6 +200,25 @@ def print_runtime_error(exc: Exception) -> None:
     print("请检查 .env 里的 provider / base_url / api_key 配置，或确认本地模型服务已经启动。")
 
 
+def ensure_demo_rag_document() -> Path:
+    """
+    生成一个本地 RAG 测试文档。
+
+    修改说明：把示例知识写到 `data/` 目录里，方便你直接运行 `main.py`
+    就能验证索引、检索和 Agent 使用 `rag_tool` 的完整链路。
+    """
+    path = Path("data/demo_rag_notes.txt")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = (
+        "项目笔记：helloAgent 当前已经支持 ReAct、Plan-and-Solve、Reflection 三种 Agent 范式。\n"
+        "记忆系统已经包含 WorkingMemory、EpisodicMemory 和 SemanticMemory。\n"
+        "用户偏好示例：用户喜欢美式咖啡，不喜欢过甜的饮品。\n"
+        "RAG 目标：先完成本地文档切片、向量检索和 `rag_tool`，后续再接真实 Qdrant 与 Neo4j。\n"
+    )
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 def test_react_agent() -> None:
     """
     运行 ReAct Agent 示例。
@@ -238,6 +282,29 @@ def test_memory_workflow() -> None:
     print_memory_snapshot(agent, "第二轮后的记忆快照")
 
 
+def test_rag_workflow() -> None:
+    """
+    运行一个最小可用的 RAG 测试。
+
+    流程：
+    1. 先把本地示例文档切片并建立索引
+    2. 再让 Agent 通过 `rag_tool` 检索文档回答问题
+    """
+    agent = build_react_agent()
+    rag_file = ensure_demo_rag_document()
+
+    index_question = (
+        f"请使用 rag_tool 把本地文档 `{rag_file.as_posix()}` 加入索引，"
+        "然后只回复“索引完成”。"
+    )
+    index_answer = agent.run(index_question)
+    print_run_summary("RAG 测试 - 建索引", index_answer, agent.current_history)
+
+    ask_question = "请使用 rag_tool 回答：helloAgent 当前支持哪些 Agent 范式？顺便说出文档里提到的饮品偏好。"
+    ask_answer = agent.run(ask_question)
+    print_run_summary("RAG 测试 - 检索问答", ask_answer, agent.current_history)
+
+
 def run_demo(target: str = "reflection") -> None:
     """根据名称运行指定的示例，方便你在一个入口里切换不同 Agent。"""
     demos = {
@@ -245,6 +312,7 @@ def run_demo(target: str = "reflection") -> None:
         "plan": test_plan_and_solve_agent,
         "reflection": test_reflection_agent,
         "memory": test_memory_workflow,
+        "rag": test_rag_workflow,
     }
     if target not in demos:
         raise ValueError(f"不支持的测试目标: {target}，可选值: {', '.join(demos)}")

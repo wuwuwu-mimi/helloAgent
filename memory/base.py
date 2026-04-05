@@ -42,6 +42,10 @@ class MemoryConfig(BaseModel):
     semantic_score_threshold: float = 0.12
     embedding_backend: str = "hash"
     embedding_dimensions: int = 96
+    rag_store_path: str = "data/rag_index.json"
+    rag_chunk_size: int = 300
+    rag_chunk_overlap: int = 60
+    rag_top_k: int = 3
     persist_user_messages: bool = True
     persist_assistant_messages: bool = True
     persist_tool_messages: bool = False
