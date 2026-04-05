@@ -17,6 +17,7 @@
 - 一个 `Reflection Agent`
 - 一个分层记忆系统：`Working / Episodic / Semantic`
 - 一个公共父类 `ReasoningAgentBase`，用于复用消息构建、LLM 请求和运行期历史管理
+- 一套轻量的上下文工程抽象：`ContextSection / ContextPacket / ContextBuilder`
 - 一个工具基类 `Tool`
 - 一个工具注册器 `ToolRegistry`
 - 一个内置示例工具 `get_time`
@@ -26,7 +27,7 @@
 - 一个本地可运行的离线 embedding 实现
 - 一个 Qdrant 适配层：有真实 Qdrant 配置时优先接入，否则自动回退到本地 JSON
 - 一个 Neo4j 图谱适配层：有真实 Neo4j 配置时优先接入，否则自动回退到本地 JSON
-- 一个最小可用的本地 RAG pipeline（文档切片 / 索引 / 检索）
+- 一个最小可用的本地 RAG pipeline（文档切片 / 索引 / 检索 / 重排 / 上下文拼装）
 - 一个 `main.py` 演示入口
 
 ## 当前支持的 Agent 范式
@@ -119,6 +120,24 @@ Action: get_time[]
 - 更稳定的图谱实体抽取与关系归纳
 - 更细粒度的关系类型与冲突消解
 
+## 当前的上下文工程进展
+
+目前项目里已经开始把“给模型喂什么上下文”从零散字符串拼接，收敛成一个更容易扩展的结构：
+
+- `ContextSection`：表示一段有标题、有来源、有优先级的上下文片段
+- `ContextPacket`：负责收集多个片段，并按优先级统一渲染
+- `ContextBuilder`：提供更直观的构建接口，用来组合系统提示、运行规则、记忆、检索结果和额外备注
+- `ReasoningAgentBase`：现在会优先把 `system prompt + 运行规则 + 相关记忆` 整理成结构化上下文，再交给模型
+- `RagPipeline`：除了返回原始检索结果，还会做一个轻量重排，并生成“参考结论 + 证据片段”的结构化检索上下文
+- `rag_tool`：新增 `context` 动作，方便后续做更细的 prompt 组装
+
+这部分还不是最终版本，但已经把后面比较重要的演进点留好了位置，例如：
+
+- 上下文裁剪
+- 多来源上下文去重
+- 更明确的优先级策略
+- 检索结果与历史记忆的合并策略
+
 ## 项目结构
 
 ```text
@@ -131,6 +150,7 @@ helloAgent/
 │  └─ reflection_agent.py      # Reflection Agent
 ├─ core/
 │  ├─ Config.py                # 配置读取与默认参数
+│  ├─ context_engineering.py   # 上下文工程抽象
 │  ├─ llm_client.py            # OpenAI-compatible LLM 封装
 │  ├─ message.py               # 统一消息结构
 │  └─ __init__.py
@@ -267,6 +287,15 @@ main.configure_logging()
 main.run_demo("rag")
 ```
 
+如果你想在“不依赖 LLM 服务”的情况下，单独验证 RAG 入库、检索重排和结构化上下文拼装，可以执行：
+
+```python
+import main
+
+main.configure_logging()
+main.run_demo("rag_smoke")
+```
+
 如果配置正确，终端会输出：
 
 - 最终答案
@@ -279,6 +308,13 @@ main.run_demo("rag")
 - 本地示例文档建索引
 - `rag_tool` 的检索结果
 - 基于检索上下文生成的最终回答
+
+在 `rag_smoke` 演示里，会直接看到：
+
+- 当前启用的向量后端
+- 写入的切片数量
+- 已索引的来源列表
+- `ContextBuilder` 生成的结构化检索上下文
 
 如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
@@ -307,6 +343,7 @@ main.run_demo("rag")
 - schema 和原生 tool calling 还没有完全接上
 - 工具系统目前比较轻量
 - 测试还不够系统化
+- 上下文工程目前还是轻量版，还没有做 token 预算与自动裁剪
 - 文档会继续补充，目录结构也可能继续调整
 
 ## 接下来准备继续做的事情
@@ -317,6 +354,7 @@ main.run_demo("rag")
 - 更多内置工具
 - 更完整的公共 Agent 抽象
 - 更稳定的多轮消息管理
+- 更完整的上下文工程策略
 - 更完善的测试和示例
 - 更真实的向量库 / 图数据库接入
 

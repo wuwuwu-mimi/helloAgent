@@ -305,6 +305,34 @@ def test_rag_workflow() -> None:
     print_run_summary("RAG 测试 - 检索问答", ask_answer, agent.current_history)
 
 
+def test_rag_pipeline_smoke() -> None:
+    """
+    运行一个不依赖 LLM 的 RAG 冒烟测试。
+
+    修改说明：上下文工程和向量库联调时，最常见的问题其实发生在“入库 / 检索 / 上下文拼装”阶段；
+    这里单独提供一个直连 `RagPipeline` 的测试入口，方便在模型服务不可用时先验证底层链路。
+    """
+    memory_manager = build_memory_manager()
+    rag_pipeline = build_rag_pipeline(memory_manager)
+    rag_file = ensure_demo_rag_document()
+
+    count = rag_pipeline.add_document(str(rag_file))
+    matches = rag_pipeline.search("helloAgent 支持哪些 Agent 范式？顺便说出饮品偏好。", limit=3)
+    answer_context = rag_pipeline.build_answer_context(
+        query="helloAgent 支持哪些 Agent 范式？顺便说出饮品偏好。",
+        matches=matches,
+    )
+
+    print("\n" + "=" * 24)
+    print("RAG Pipeline 冒烟测试")
+    print("=" * 24)
+    print(f"向量后端: {rag_pipeline.store.backend}")
+    print(f"写入切片数: {count}")
+    print(f"已索引来源: {', '.join(rag_pipeline.list_sources()) or '(空)'}")
+    print("\n结构化上下文：")
+    print(answer_context or "(没有生成上下文)")
+
+
 def run_demo(target: str = "reflection") -> None:
     """根据名称运行指定的示例，方便你在一个入口里切换不同 Agent。"""
     demos = {
@@ -313,6 +341,7 @@ def run_demo(target: str = "reflection") -> None:
         "reflection": test_reflection_agent,
         "memory": test_memory_workflow,
         "rag": test_rag_workflow,
+        "rag_smoke": test_rag_pipeline_smoke,
     }
     if target not in demos:
         raise ValueError(f"不支持的测试目标: {target}，可选值: {', '.join(demos)}")

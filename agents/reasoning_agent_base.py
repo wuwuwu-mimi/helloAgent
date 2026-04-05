@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, List, Optional
 
 from agents.agent_base import Agent
-from core import Config, HelloAgentsLLM, Message
+from core import Config, ContextBuilder, HelloAgentsLLM, Message
 from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 
@@ -48,12 +48,12 @@ class ReasoningAgentBase(Agent):
     def _build_messages(self, prompt: str) -> List[Message]:
         """把本轮 prompt 包装成发给 LLM 的消息列表。"""
         messages: List[Message] = []
-        if self.system_prompt:
-            messages.append(Message.system(self.system_prompt))
-        memory_context = self._build_memory_context()
-        if memory_context:
-            # 修改说明：记忆上下文作为额外 system message 注入，避免污染原始用户问题。
-            messages.append(Message.system(memory_context, metadata={"source": "memory"}))
+        context_packet = self._build_context_packet()
+        rendered_context = context_packet.render()
+        if rendered_context:
+            # 修改说明：把 system prompt、记忆和运行规则都收敛到结构化上下文里，
+            # 这样后续继续做上下文裁剪、优先级合并时不需要重写消息拼装逻辑。
+            messages.append(Message.system(rendered_context, metadata={"source": "context_engineering"}))
         messages.append(Message.user(prompt))
         return messages
 
@@ -82,6 +82,22 @@ class ReasoningAgentBase(Agent):
             query=self.current_input,
             exclude_text=self.current_input,
         )
+
+    def _build_context_packet(self):
+        """构建本轮请求的结构化上下文。"""
+        builder = ContextBuilder()
+        if self.system_prompt:
+            builder.add_system_prompt(self.system_prompt)
+        builder.add_runtime_rules(
+            [
+                "优先遵守工具事实和显式上下文，不要编造未观察到的信息。",
+                "如果历史记忆或检索上下文不足以支持结论，应明确说明不确定性。",
+            ]
+        )
+        memory_context = self._build_memory_context()
+        if memory_context:
+            builder.add_memory(memory_context)
+        return builder.build()
 
     def _remember_message(self, message: Message, persist: Optional[bool] = None) -> None:
         """把消息放进运行态历史，并按配置决定是否写入长期记忆。"""

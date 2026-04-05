@@ -47,11 +47,7 @@ class DocumentStore:
                     """
                 )
         except sqlite3.OperationalError:
-            # 修改说明：某些受限环境里 SQLite 可能无法正常落盘，
-            # 这里自动回退到 JSON 文件存储，保证记忆功能仍然可用。
-            self.backend = "json"
-            if not self.fallback_path.exists():
-                self.fallback_path.write_text("[]", encoding="utf-8")
+            self._activate_json_fallback()
 
     def add_item(self, item: MemoryItem) -> None:
         """写入一条持久化记忆。"""
@@ -62,24 +58,30 @@ class DocumentStore:
             self._save_json_items(items)
             return
 
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO memory_items (
-                    id, session_id, role, content, memory_type, metadata, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    item.id,
-                    item.session_id,
-                    item.role,
-                    item.content,
-                    item.memory_type,
-                    json.dumps(item.metadata, ensure_ascii=False),
-                    item.created_at.isoformat(),
-                    item.expires_at.isoformat() if item.expires_at else None,
-                ),
-            )
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO memory_items (
+                        id, session_id, role, content, memory_type, metadata, created_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.id,
+                        item.session_id,
+                        item.role,
+                        item.content,
+                        item.memory_type,
+                        json.dumps(item.metadata, ensure_ascii=False),
+                        item.created_at.isoformat(),
+                        item.expires_at.isoformat() if item.expires_at else None,
+                    ),
+                )
+        except sqlite3.OperationalError:
+            # 修改说明：有些 Windows / 沙箱环境会在运行时突然出现 disk I/O error，
+            # 这里即时切回 JSON fallback，避免一次 SQLite 异常直接让整条 Agent 链路中断。
+            self._activate_json_fallback()
+            self.add_item(item)
 
     def list_recent(self, session_id: str, limit: int = 10) -> List[MemoryItem]:
         """读取最近若干条记忆。"""
@@ -88,16 +90,20 @@ class DocumentStore:
             items.sort(key=lambda item: item.created_at, reverse=True)
             return items[:limit]
 
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM memory_items
-                WHERE session_id = ?
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (session_id, limit),
-            ).fetchall()
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM memory_items
+                    WHERE session_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (session_id, limit),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            self._activate_json_fallback()
+            return self.list_recent(session_id, limit)
         return [self._row_to_item(row) for row in rows]
 
     def search_items(self, session_id: str, query: str, limit: int = 10) -> List[MemoryItem]:
@@ -113,17 +119,21 @@ class DocumentStore:
             return items[:limit]
 
         like_query = f"%{query.strip()}%"
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM memory_items
-                WHERE session_id = ?
-                  AND content LIKE ?
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (session_id, like_query, limit),
-            ).fetchall()
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM memory_items
+                    WHERE session_id = ?
+                      AND content LIKE ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (session_id, like_query, limit),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            self._activate_json_fallback()
+            return self.search_items(session_id, query, limit)
         return [self._row_to_item(row) for row in rows]
 
     def clear_session(self, session_id: str) -> None:
@@ -133,11 +143,15 @@ class DocumentStore:
             self._save_json_items(items)
             return
 
-        with self._connect() as connection:
-            connection.execute(
-                "DELETE FROM memory_items WHERE session_id = ?",
-                (session_id,),
-            )
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "DELETE FROM memory_items WHERE session_id = ?",
+                    (session_id,),
+                )
+        except sqlite3.OperationalError:
+            self._activate_json_fallback()
+            self.clear_session(session_id)
 
     def _load_json_items(self) -> List[MemoryItem]:
         raw_text = self.fallback_path.read_text(encoding="utf-8") if self.fallback_path.exists() else "[]"
@@ -150,6 +164,12 @@ class DocumentStore:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _activate_json_fallback(self) -> None:
+        """切换到 JSON fallback，并确保 fallback 文件存在。"""
+        self.backend = "json"
+        if not self.fallback_path.exists():
+            self.fallback_path.write_text("[]", encoding="utf-8")
 
     @staticmethod
     def _row_to_item(row: sqlite3.Row) -> MemoryItem:

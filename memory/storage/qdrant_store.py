@@ -4,6 +4,7 @@ import json
 from hashlib import md5
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from memory.base import MemoryConfig, MemoryItem
 from memory.embedding import BaseEmbeddingService
@@ -258,13 +259,18 @@ class QdrantVectorStore:
     def _qdrant_upsert(self, *, record_id: str, vector: List[float], payload: Dict[str, Any]) -> None:
         if self.client is None:
             raise RuntimeError("Qdrant client is not initialized.")
+        point_id = self._normalize_qdrant_point_id(record_id)
+        normalized_payload = dict(payload)
+        # 修改说明：云端 Qdrant 只接受 uint 或 UUID 作为 point id，
+        # 这里统一把业务侧的字符串 record_id 映射成稳定 UUID，同时把原始 id 保存在 payload 里。
+        normalized_payload.setdefault("_record_id", record_id)
         self.client.upsert(
             collection_name=self.collection_name,
             points=[
                 {
-                    "id": record_id,
+                    "id": point_id,
                     "vector": vector,
-                    "payload": payload,
+                    "payload": normalized_payload,
                 }
             ],
         )
@@ -292,7 +298,7 @@ class QdrantVectorStore:
         points = getattr(response, "points", []) or []
         return [
             {
-                "id": str(point.id),
+                "id": str((point.payload or {}).get("_record_id", point.id)),
                 "score": float(point.score),
                 "payload": dict(point.payload or {}),
             }
@@ -311,13 +317,30 @@ class QdrantVectorStore:
         )
         items = [
             {
-                "id": str(point.id),
+                "id": str((point.payload or {}).get("_record_id", point.id)),
                 "payload": dict(point.payload or {}),
             }
             for point in all_points
         ]
         items.sort(key=lambda item: item["payload"].get("created_at", ""), reverse=True)
         return items[:limit]
+
+    def _normalize_qdrant_point_id(self, record_id: str) -> str | int:
+        """
+        把业务层 record_id 规范成 Qdrant 可接受的 point id。
+
+        修改说明：优先保留原本就是整数或 UUID 的 id；
+        其他字符串则稳定映射到 UUID5，避免云端 Qdrant 因非法 point id 拒绝写入。
+        """
+        text = str(record_id).strip()
+        if text.isdigit():
+            return int(text)
+
+        try:
+            return str(UUID(text))
+        except ValueError:
+            stable_key = f"{self.collection_name}:{text}"
+            return str(uuid5(NAMESPACE_URL, stable_key))
 
     def _qdrant_clear(self, *, filters: Dict[str, Any]) -> None:
         if self.client is None or qdrant_models is None:

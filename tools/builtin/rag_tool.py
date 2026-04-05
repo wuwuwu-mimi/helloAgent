@@ -18,10 +18,11 @@ class RagTool(Tool):
 
     def run(self, parameters: Dict[str, Any]) -> str:
         """
-        支持四种动作：
+        支持五种动作：
         - add: 把本地文档切片并建立索引
         - search: 返回最相关的文档片段
-        - answer: 返回适合直接参考的上下文摘要
+        - answer: 返回带“参考结论 + 证据片段”的上下文摘要
+        - context: 返回结构化检索上下文，适合进一步做 prompt 拼装
         - clear: 清空当前 RAG 索引
         """
         action = str(parameters.get("action", "search")).strip().lower()
@@ -52,6 +53,15 @@ class RagTool(Tool):
                 return "rag_tool answer 需要提供 query。"
             return self.rag_pipeline.answer(query, limit=limit)
 
+        if action == "context":
+            query = str(parameters.get("query", "")).strip()
+            if not query:
+                return "rag_tool context 需要提供 query。"
+            matches = self.rag_pipeline.search(query, limit=limit)
+            if not matches:
+                return "没有检索到相关文档。"
+            return self.rag_pipeline.build_answer_context(query=query, matches=matches)
+
         if action == "clear":
             self.rag_pipeline.clear()
             return "当前 RAG 索引已清空。"
@@ -67,7 +77,7 @@ class RagTool(Tool):
             ToolParameter(
                 name="action",
                 type="string",
-                description="动作类型，可选 add/search/answer/clear/sources。",
+                description="动作类型，可选 add/search/answer/context/clear/sources。",
             ),
             ToolParameter(
                 name="path",
