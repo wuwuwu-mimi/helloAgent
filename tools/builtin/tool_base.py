@@ -72,6 +72,10 @@ class ToolParameter(BaseModel):
     default: Any = None
     choices: List[Any] = Field(default_factory=list)
     items_type: Optional[str] = None
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    min_length: Optional[int] = None
+    max_length: Optional[int] = None
 
 
 class Tool(ABC):
@@ -122,6 +126,14 @@ class Tool(ABC):
                 field_schema["enum"] = list(parameter.choices)
             if parameter.type == "array" and parameter.items_type:
                 field_schema["items"] = {"type": parameter.items_type}
+            if parameter.minimum is not None:
+                field_schema["minimum"] = parameter.minimum
+            if parameter.maximum is not None:
+                field_schema["maximum"] = parameter.maximum
+            if parameter.min_length is not None:
+                field_schema["minLength"] = parameter.min_length
+            if parameter.max_length is not None:
+                field_schema["maxLength"] = parameter.max_length
             if parameter.default is not None:
                 field_schema["default"] = parameter.default
 
@@ -165,7 +177,7 @@ class Tool(ABC):
                 continue
 
             normalized[item.name] = self._normalize_parameter_value(item, parameters[item.name])
-        return normalized
+        return self.validate_normalized_parameters(normalized)
 
     def _normalize_parameter_value(self, parameter: ToolParameter, value: Any) -> Any:
         """根据参数 schema 做最小可用的类型归一化。"""
@@ -175,7 +187,17 @@ class Tool(ABC):
             raise ToolValidationError(
                 f"Tool '{self.name}' parameter '{parameter.name}' must be one of: {choices}."
             )
+        self._validate_parameter_constraints(parameter, coerced)
         return coerced
+
+    def validate_normalized_parameters(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        提供给子类覆盖的语义校验入口。
+
+        修改说明：基础 schema 只能描述“类型/范围”，像“action=add 时必须提供 path”
+        这类跨字段规则更适合在这里集中处理。
+        """
+        return parameters
 
     def _coerce_value(self, parameter: ToolParameter, value: Any) -> Any:
         """把常见字符串输入尽量转成 schema 约定的 Python 类型。"""
@@ -268,6 +290,28 @@ class Tool(ABC):
         # 修改说明：先保底原样返回，后续如果要扩展 date / enum object 等类型，
         # 可以继续在这里补更细粒度的 schema 适配。
         return value
+
+    def _validate_parameter_constraints(self, parameter: ToolParameter, value: Any) -> None:
+        """校验单个参数的范围和长度约束。"""
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if parameter.minimum is not None and value < parameter.minimum:
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' must be >= {parameter.minimum}."
+                )
+            if parameter.maximum is not None and value > parameter.maximum:
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' must be <= {parameter.maximum}."
+                )
+
+        if isinstance(value, str):
+            if parameter.min_length is not None and len(value) < parameter.min_length:
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' length must be >= {parameter.min_length}."
+                )
+            if parameter.max_length is not None and len(value) > parameter.max_length:
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' length must be <= {parameter.max_length}."
+                )
 
     def format_for_prompt(self) -> str:
         """

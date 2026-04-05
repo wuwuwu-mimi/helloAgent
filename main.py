@@ -175,6 +175,8 @@ class SchemaSmokeTool(Tool):
                 description="执行级别。",
                 required=False,
                 default=1,
+                minimum=1,
+                maximum=5,
             ),
             ToolParameter(
                 name="dry_run",
@@ -184,6 +186,14 @@ class SchemaSmokeTool(Tool):
                 default=False,
             ),
         ]
+
+    def validate_normalized_parameters(self, parameters: dict[str, object]) -> dict[str, object]:
+        """演示跨字段语义校验。"""
+        mode = str(parameters.get("mode", "")).strip().lower()
+        level = int(parameters.get("level", 1) or 1)
+        if mode == "fast" and level < 3:
+            raise ToolValidationError("Tool 'schema_smoke_tool' requires level >= 3 when mode=fast.")
+        return parameters
 
 
 class FlakyRecoveryTool(Tool):
@@ -929,6 +939,22 @@ def test_tool_schema_smoke() -> None:
         print(str(exc))
     else:
         print("未触发预期错误，请检查 schema 校验逻辑。")
+
+    print("\n范围约束示例：")
+    try:
+        tool.normalize_parameters({"mode": "safe", "level": "9", "dry_run": "false"})
+    except ToolValidationError as exc:
+        print(str(exc))
+    else:
+        print("未触发预期错误，请检查范围校验逻辑。")
+
+    print("\n跨字段语义校验示例：")
+    try:
+        tool.normalize_parameters({"mode": "fast", "level": "1", "dry_run": "false"})
+    except ToolValidationError as exc:
+        print(str(exc))
+    else:
+        print("未触发预期错误，请检查跨字段校验逻辑。")
 
 
 def test_tool_recovery_smoke() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from memory.rag import RagPipeline
-from tools.builtin.tool_base import Tool, ToolParameter, ToolResult
+from tools.builtin.tool_base import Tool, ToolParameter, ToolResult, ToolValidationError
 
 
 class RagTool(Tool):
@@ -143,6 +143,7 @@ class RagTool(Tool):
                 description="当 action=add 时使用的本地文档路径。",
                 required=False,
                 default="",
+                min_length=1,
             ),
             ToolParameter(
                 name="query",
@@ -150,6 +151,7 @@ class RagTool(Tool):
                 description="当 action=search 或 answer 时使用的查询内容。",
                 required=False,
                 default="",
+                min_length=1,
             ),
             ToolParameter(
                 name="limit",
@@ -157,5 +159,20 @@ class RagTool(Tool):
                 description="返回切片条数上限。",
                 required=False,
                 default=3,
+                minimum=1,
             ),
         ]
+
+    def validate_normalized_parameters(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """补充 rag_tool 的 action 级必填校验。"""
+        action = str(parameters.get("action", "search")).strip().lower()
+        path = str(parameters.get("path", "")).strip()
+        query = str(parameters.get("query", "")).strip()
+
+        if action == "add" and not path:
+            raise ToolValidationError("Tool 'rag_tool' requires non-empty 'path' when action=add.")
+        if action in {"search", "answer", "context"} and not query:
+            raise ToolValidationError(
+                f"Tool 'rag_tool' requires non-empty 'query' when action={action}."
+            )
+        return parameters

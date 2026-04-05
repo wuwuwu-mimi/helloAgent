@@ -571,6 +571,8 @@ main.run_demo("native_reflection_smoke")
 
 - 工具自动生成的参数 Schema
 - 字符串参数被归一化为 `integer / boolean`
+- `minimum / maximum / minLength` 等约束会进入 schema
+- action 级跨字段规则也可以走本地语义校验
 - 工具执行结果会被包装成统一的 `ToolResult`
 - ToolResult 里的 `meta / data` 已开始接入日志、工具观察和工具记忆
 - 非法枚举值时的本地校验错误提示
@@ -628,7 +630,8 @@ main.run_demo("native_reflection_smoke")
 
 - 仍然偏学习 / 实验用途，不是生产框架
 - schema 和原生 tool calling 还没有完全接上
-- 工具 schema 当前已经有第一版本地校验骨架，但还没有补到复杂嵌套结构和更细的约束
+- 工具 schema 当前已经支持类型、默认值、枚举、范围和跨字段语义校验
+- 但还没有补到复杂嵌套结构、条件 schema 和更细的约束
 - 工具执行结果当前已经有第一版 `ToolResult` 协议，并已开始接入日志与工具记忆
 - 失败恢复、自动重试和基础降级提示已经有第一版实现
 - 但还没有把熔断、统计、策略化重试等能力全部围绕它重构完

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from memory.manager import MemoryManager
-from tools.builtin.tool_base import Tool, ToolParameter, ToolResult
+from tools.builtin.tool_base import Tool, ToolParameter, ToolResult, ToolValidationError
 
 
 class MemoryTool(Tool):
@@ -126,6 +126,7 @@ class MemoryTool(Tool):
                 description="当 action=search 时使用的搜索词。",
                 required=False,
                 default="",
+                min_length=1,
             ),
             ToolParameter(
                 name="content",
@@ -133,6 +134,7 @@ class MemoryTool(Tool):
                 description="当 action=remember 时要写入的记忆内容。",
                 required=False,
                 default="",
+                min_length=1,
             ),
             ToolParameter(
                 name="limit",
@@ -140,8 +142,21 @@ class MemoryTool(Tool):
                 description="返回记忆条数上限。",
                 required=False,
                 default=5,
+                minimum=1,
             ),
         ]
+
+    def validate_normalized_parameters(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """补充 action 级别的跨字段校验。"""
+        action = str(parameters.get("action", "recent")).strip().lower()
+        query = str(parameters.get("query", "")).strip()
+        content = str(parameters.get("content", "")).strip()
+
+        if action == "search" and not query:
+            raise ToolValidationError("Tool 'memory_tool' requires non-empty 'query' when action=search.")
+        if action == "remember" and not content:
+            raise ToolValidationError("Tool 'memory_tool' requires non-empty 'content' when action=remember.")
+        return parameters
 
     @staticmethod
     def _format_items(items: List[Any]) -> str:
