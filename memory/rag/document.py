@@ -54,7 +54,7 @@ class DocumentProcessor:
                 continue
             chunks.append(
                 DocumentChunk(
-                    chunk_id=f"{Path(source).name}-chunk-{index}",
+                    chunk_id=f"{Path(source).name}-chunk-{index:04d}",
                     source=source,
                     content=chunk_text,
                 )

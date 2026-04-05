@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any, Dict, List
-
 from memory.base import MemoryConfig
 from memory.embedding import BaseEmbeddingService, EmbeddingServiceFactory
 from memory.rag.document import DocumentChunk, DocumentProcessor, RetrievedChunk
+from memory.storage.qdrant_store import QdrantVectorStore
 
 
 class RagPipeline:
@@ -23,10 +21,12 @@ class RagPipeline:
             chunk_size=config.rag_chunk_size,
             chunk_overlap=config.rag_chunk_overlap,
         )
-        self.store_path = Path(config.rag_store_path)
-        self.store_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.store_path.exists():
-            self.store_path.write_text("[]", encoding="utf-8")
+        self.store = QdrantVectorStore(
+            config=config,
+            embedding_service=self.embedding_service,
+            collection_name=config.qdrant_rag_collection,
+            store_path=config.rag_store_path,
+        )
 
     def add_document(self, path: str) -> int:
         """
@@ -39,35 +39,41 @@ class RagPipeline:
         if not chunks:
             return 0
 
-        records = self._load_records()
+        raw_source = str(Path(path))
         source = str(Path(path).resolve())
-        records = [record for record in records if record["chunk"]["source"] != source]
-
+        self.store.clear_records(filters={"source": raw_source})
+        if source != raw_source:
+            self.store.clear_records(filters={"source": source})
         for chunk in chunks:
-            records.append(
-                {
+            self.store.upsert_record(
+                record_id=chunk.chunk_id,
+                vector=self.embedding_service.embed(chunk.content),
+                payload={
+                    "source": chunk.source,
+                    "chunk_id": chunk.chunk_id,
+                    "content": chunk.content,
+                    "created_at": chunk.chunk_id,
                     "chunk": chunk.model_dump(mode="json"),
-                    "vector": self.embedding_service.embed(chunk.content),
-                }
+                },
             )
-
-        self._save_records(records)
         return len(chunks)
 
     def search(self, query: str, limit: int | None = None) -> List[RetrievedChunk]:
         """按向量相似度返回最相关的文档切片。"""
-        query_vector = self.embedding_service.embed(query)
-        scored_items: List[RetrievedChunk] = []
-        for record in self._load_records():
-            chunk = DocumentChunk.model_validate(record["chunk"])
-            score = self.embedding_service.cosine_similarity(query_vector, record.get("vector", []))
-            if score <= 0:
-                continue
-            scored_items.append(RetrievedChunk(chunk=chunk, score=score))
-
         resolved_limit = limit or self.config.rag_top_k
-        scored_items.sort(key=lambda item: item.score, reverse=True)
-        return scored_items[:resolved_limit]
+        matches = self.store.search_records(
+            vector=self.embedding_service.embed(query),
+            limit=resolved_limit,
+            score_threshold=0.0,
+        )
+        return [
+            RetrievedChunk(
+                chunk=DocumentChunk.model_validate(item["payload"]["chunk"]),
+                score=item["score"],
+            )
+            for item in matches
+            if "chunk" in item["payload"]
+        ]
 
     def answer(self, query: str, limit: int | None = None) -> str:
         """把检索结果整理成可直接给模型参考的上下文摘要。"""
@@ -84,11 +90,15 @@ class RagPipeline:
 
     def clear(self) -> None:
         """清空当前 RAG 索引。"""
-        self._save_records([])
+        self.store.clear_records()
 
     def list_sources(self) -> List[str]:
         """列出当前已入库的文档来源。"""
-        sources = {record["chunk"]["source"] for record in self._load_records()}
+        sources = {
+            record["payload"].get("source", "")
+            for record in self.store.list_recent_records(limit=1000)
+        }
+        sources.discard("")
         return sorted(sources)
 
     def run(self, query: str, documents: List[DocumentChunk]) -> str:
@@ -99,30 +109,24 @@ class RagPipeline:
         现在仍允许这样调用，但内部会统一走检索格式输出。
         """
         if documents:
-            temp_records: List[Dict[str, Any]] = []
-            for chunk in documents:
-                temp_records.append(
-                    {
-                        "chunk": chunk.model_dump(mode="json"),
-                        "vector": self.embedding_service.embed(chunk.content),
-                    }
-                )
-            matches = self._search_records(query, temp_records, limit=self.config.rag_top_k)
+            matches = self._search_inline_documents(query, documents, limit=self.config.rag_top_k)
             return self._format_matches(matches)
         return self.answer(query)
 
-    def _search_records(
+    def _search_inline_documents(
         self,
         query: str,
-        records: List[Dict[str, Any]],
+        documents: List[DocumentChunk],
         *,
         limit: int,
     ) -> List[RetrievedChunk]:
         query_vector = self.embedding_service.embed(query)
         matches: List[RetrievedChunk] = []
-        for record in records:
-            chunk = DocumentChunk.model_validate(record["chunk"])
-            score = self.embedding_service.cosine_similarity(query_vector, record.get("vector", []))
+        for chunk in documents:
+            score = self.embedding_service.cosine_similarity(
+                query_vector,
+                self.embedding_service.embed(chunk.content),
+            )
             if score <= 0:
                 continue
             matches.append(RetrievedChunk(chunk=chunk, score=score))
@@ -135,14 +139,4 @@ class RagPipeline:
         return "\n\n".join(
             f"来源: {item.chunk.source} | 分数: {item.score:.4f}\n{item.chunk.content}"
             for item in matches
-        )
-
-    def _load_records(self) -> List[Dict[str, Any]]:
-        raw_text = self.store_path.read_text(encoding="utf-8")
-        return json.loads(raw_text or "[]")
-
-    def _save_records(self, records: List[Dict[str, Any]]) -> None:
-        self.store_path.write_text(
-            json.dumps(records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )

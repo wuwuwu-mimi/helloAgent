@@ -43,9 +43,9 @@ def build_memory_manager() -> MemoryManager:
     创建默认的记忆管理器。
 
     修改说明：当前已经包含“工作记忆 + 情景记忆 + 最小语义记忆”，
-    后续如果要切到真实 Qdrant / Neo4j，可以继续在这里统一替换。
+    并且会优先读取环境变量里的向量存储配置，方便切到真实 Qdrant。
     """
-    return MemoryManager(MemoryConfig())
+    return MemoryManager(MemoryConfig.from_env())
 
 
 def build_rag_pipeline(memory_manager: MemoryManager) -> RagPipeline:

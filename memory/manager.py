@@ -22,8 +22,10 @@ class MemoryManager:
         self.semantic_memory = SemanticMemory(
             config=self.config,
             store=QdrantVectorStore(
-                store_path=self.config.semantic_store_path,
+                config=self.config,
                 embedding_service=self.embedding_service,
+                collection_name=self.config.qdrant_semantic_collection,
+                store_path=self.config.semantic_store_path,
             ),
             embedding_service=self.embedding_service,
         )

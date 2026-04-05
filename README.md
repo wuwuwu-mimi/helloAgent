@@ -24,7 +24,7 @@
 - 一个内置检索工具 `rag_tool`
 - 一个统一的 OpenAI-compatible LLM 调用层
 - 一个本地可运行的离线 embedding 实现
-- 一个 Qdrant 风格的本地向量存储适配层（当前先用 JSON 落盘）
+- 一个 Qdrant 适配层：有真实 Qdrant 配置时优先接入，否则自动回退到本地 JSON
 - 一个最小可用的本地 RAG pipeline（文档切片 / 索引 / 检索）
 - 一个 `main.py` 演示入口
 
@@ -98,15 +98,15 @@ Action: get_time[]
 - `MemoryManager`：统一协调写入、召回、去重和 prompt 注入
 - `memory_tool`：支持 `recent / search / remember / clear`
 
-当前这套语义检索还不是完整的生产级 embedding / Qdrant 方案，但已经能：
+当前这套语义检索已经开始兼容真实 Qdrant，当前阶段可以做到：
 
 - 把长期记忆同步写入向量存储
 - 在后续 query 中做最小语义召回
-- 在没有额外服务依赖时直接本地运行
+- 在没有额外服务依赖时自动回退到本地 JSON
+- 同一套向量存储能力同时复用于 `SemanticMemory` 和 `RAG`
 
 后续还会继续往这些方向补：
 
-- 真正的 Qdrant 服务接入
 - Neo4j 图谱记忆
 - 更多文档格式解析
 - 基于检索结果的自动答案合成 / 重排
@@ -173,6 +173,12 @@ source .venv/bin/activate
 pip install openai python-dotenv pydantic
 ```
 
+如果你准备接真实 Qdrant，再额外安装：
+
+```bash
+pip install qdrant-client
+```
+
 说明：
 
 - 仓库里的依赖清单还没有整理成正式可发布版本
@@ -199,6 +205,18 @@ LLM_MODEL_ID=deepseek-chat
 LLM_API_KEY=your_api_key_here
 LLM_BASE_URL=https://api.deepseek.com/v1
 ```
+
+如果你想启用真实 Qdrant，可以继续加上这些可选配置：
+
+```env
+VECTOR_STORE_BACKEND=auto
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=
+QDRANT_SEMANTIC_COLLECTION=semantic_memory
+QDRANT_RAG_COLLECTION=rag_chunks
+```
+
+如果你不配置 `QDRANT_URL`，或者本地没有安装 `qdrant-client`，项目会自动回退到 JSON 向量存储。
 
 注意：
 
