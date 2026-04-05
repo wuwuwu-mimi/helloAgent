@@ -1,5 +1,7 @@
 # Local secrets and machine-specific environment variables.
 .env
+agent_api_key.txt
+Neo4j-*.txt
 
 # Python virtual environment.
 .venv/

@@ -233,15 +233,27 @@ class QdrantVectorStore:
         if self.client is None or qdrant_models is None:
             return
         collections = self.client.get_collections().collections
-        if any(item.name == self.collection_name for item in collections):
-            return
-        self.client.create_collection(
-            collection_name=self.collection_name,
-            vectors_config=qdrant_models.VectorParams(
-                size=self.config.embedding_dimensions,
-                distance=qdrant_models.Distance.COSINE,
-            ),
-        )
+        if not any(item.name == self.collection_name for item in collections):
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=qdrant_models.VectorParams(
+                    size=self.config.embedding_dimensions,
+                    distance=qdrant_models.Distance.COSINE,
+                ),
+            )
+
+        # 修改说明：云端 Qdrant 对过滤字段通常要求先建 payload index，
+        # 否则按 `session_id` / `source` 过滤删除或检索时会直接报 400。
+        for field_name in ("session_id", "source"):
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field_name,
+                    field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
+                )
+            except Exception:
+                # 索引已存在或当前 collection 不需要该字段时，忽略即可。
+                continue
 
     def _qdrant_upsert(self, *, record_id: str, vector: List[float], payload: Dict[str, Any]) -> None:
         if self.client is None:
@@ -268,13 +280,16 @@ class QdrantVectorStore:
         if self.client is None or qdrant_models is None:
             return []
         query_filter = self._build_qdrant_filter(filters)
-        points = self.client.search(
+        response = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=vector,
+            query=vector,
             limit=limit,
             score_threshold=score_threshold,
             query_filter=query_filter,
+            with_payload=True,
+            with_vectors=False,
         )
+        points = getattr(response, "points", []) or []
         return [
             {
                 "id": str(point.id),

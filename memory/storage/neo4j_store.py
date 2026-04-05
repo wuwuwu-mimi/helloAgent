@@ -22,7 +22,43 @@ class Neo4jGraphStore:
     后续只要本地装好 `neo4j` 驱动并配置连接信息，就能直接切到真实图数据库。
     """
 
-    _ENTITY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_\-]+|[\u4e00-\u9fff]{2,12}")
+    _ENTITY_PATTERN = re.compile(r"`[^`]+`|[A-Za-z][A-Za-z0-9_\-+.]{1,31}|[\u4e00-\u9fff]{2,16}")
+    _SPLIT_PATTERN = re.compile(r"[，,、/]|(?:\s+and\s+)|(?:\s+or\s+)|和|以及|并且|还有|及")
+    _STOPWORDS = {
+        "当前",
+        "然后",
+        "用户问题",
+        "回答问题",
+        "直接回答",
+        "这个问题",
+        "这个答案",
+        "一下",
+        "什么",
+        "哪些",
+        "一下子",
+        "时候",
+        "进行",
+        "需要",
+        "可以",
+        "已经",
+        "目前",
+        "当前支持",
+        "支持",
+        "包含",
+        "具备",
+        "提供",
+        "采用",
+        "三种",
+        "范式",
+        "饮品",
+    }
+    _RELATION_VERBS = ("喜欢", "不喜欢", "偏好", "爱喝", "爱吃", "讨厌", "避免", "支持", "包含", "具备", "提供", "采用", "记住", "记录", "是")
+    _CANONICAL_ENTITY_MAP = {
+        "我": "用户",
+        "我的": "用户",
+        "我喜欢": "用户",
+        "用户偏好": "用户",
+    }
 
     def __init__(self, config: MemoryConfig) -> None:
         self.config = config
@@ -86,63 +122,75 @@ class Neo4jGraphStore:
 
     @classmethod
     def extract_entities(cls, text: str) -> List[str]:
-        """从文本中抽取最小可用的实体候选。"""
+        """从文本中抽取更稳一些的实体候选。"""
         candidates: List[str] = []
-        for token in cls._ENTITY_PATTERN.findall(text):
-            normalized = token.strip("，。！？,.!?：:；;()[]{}<>\"'")
-            if len(normalized) < 2:
-                continue
-            if normalized in {"当前", "然后", "用户问题", "回答问题", "直接回答"}:
-                continue
-            candidates.append(normalized)
+        normalized_text = text.replace("（", "(").replace("）", ")")
 
-        deduped: List[str] = []
-        seen: set[str] = set()
-        for item in candidates:
-            if item in seen:
-                continue
-            seen.add(item)
-            deduped.append(item)
-        return deduped[:12]
+        if "我" in normalized_text or "用户" in normalized_text:
+            candidates.append("用户")
 
-    @staticmethod
-    def extract_relations(text: str, entities: List[str]) -> List[Dict[str, str]]:
-        """从文本中抽取最小关系结构。"""
+        for token in cls._ENTITY_PATTERN.findall(normalized_text):
+            entity = cls._normalize_entity(token)
+            if not entity:
+                continue
+            candidates.append(entity)
+
+        # 修改说明：除了直接扫 token，再补一层“关系主语/宾语候选”切分，
+        # 让 “ReAct、Plan-and-Solve、Reflection” 这种枚举结构更容易完整保留下来。
+        for fragment in cls._SPLIT_PATTERN.split(normalized_text):
+            entity = cls._normalize_entity(fragment)
+            if not entity:
+                continue
+            candidates.append(entity)
+
+        return cls._dedupe_texts(candidates, limit=16)
+
+    @classmethod
+    def extract_relations(cls, text: str, entities: List[str]) -> List[Dict[str, str]]:
+        """从文本中抽取更丰富的最小关系结构。"""
         relations: List[Dict[str, str]] = []
-        lowered = text.strip()
+        normalized = " ".join(text.strip().split())
 
-        preference_match = re.search(r"(我|用户)[^。！？\n]{0,12}(喜欢|偏好)([^。！？\n]{1,24})", lowered)
-        if preference_match:
-            subject = preference_match.group(1)
-            relation = "喜欢"
-            target = preference_match.group(3).strip("：:，,。. ")
-            if target:
-                relations.append(
-                    {
-                        "source": subject,
-                        "relation": relation,
-                        "target": target,
-                    }
-                )
+        relation_patterns = [
+            (r"(我|用户)(?:[^。！？\n，,]{0,8})?(喜欢|偏好|爱喝|爱吃)\s*([^，,。！？\n]{1,40})", "喜欢"),
+            (r"(我|用户)(?:[^。！？\n，,]{0,8})?(不喜欢|讨厌|避免)\s*([^，,。！？\n]{1,40})", "不喜欢"),
+            (r"([A-Za-z][A-Za-z0-9_\-+.]{1,31}|[\u4e00-\u9fff]{2,16})[^。！？\n]{0,10}(支持|包含|具备|提供|采用)([^。！？\n]{1,80})", None),
+            (r"([A-Za-z][A-Za-z0-9_\-+.]{1,31}|[\u4e00-\u9fff]{2,16})[^。！？\n]{0,10}(记住|记录)([^。！？\n]{1,40})", None),
+            (r"([A-Za-z][A-Za-z0-9_\-+.]{1,31}|[\u4e00-\u9fff]{2,16})\s*是\s*([^。！？\n]{1,40})", "是"),
+        ]
 
-        support_match = re.search(r"([A-Za-z][A-Za-z0-9_\-]+|[\u4e00-\u9fff]{2,12})[^。！？\n]{0,8}(支持|包含)([^。！？\n]+)", lowered)
-        if support_match:
-            source = support_match.group(1)
-            relation = support_match.group(2)
-            tail = support_match.group(3)
-            targets = [item.strip("，,、。 ") for item in re.split(r"[，,、]", tail) if item.strip()]
-            for target in targets[:6]:
-                relations.append(
-                    {
-                        "source": source,
-                        "relation": relation,
-                        "target": target,
-                    }
-                )
+        for pattern, forced_relation in relation_patterns:
+            for match in re.finditer(pattern, normalized):
+                source = cls._normalize_entity(match.group(1))
+                relation = forced_relation or cls._normalize_relation(match.group(2))
+                tail = match.group(3) if match.lastindex and match.lastindex >= 3 else ""
+                targets = cls._extract_targets(tail, entities)
+                for target in targets:
+                    if not source or not target or source == target:
+                        continue
+                    relations.append(
+                        {
+                            "source": source,
+                            "relation": relation,
+                            "target": target,
+                        }
+                    )
+
+        if "我" in normalized or "用户" in normalized:
+            for match in re.finditer(r"(?:^|[，,；;])\s*(不喜欢|讨厌|避免)\s*([^，,。！？\n]{1,40})", normalized):
+                targets = cls._extract_targets(match.group(2), entities)
+                for target in targets:
+                    relations.append(
+                        {
+                            "source": "用户",
+                            "relation": "不喜欢",
+                            "target": target,
+                        }
+                    )
 
         if not relations and len(entities) >= 2:
             anchor = entities[0]
-            for target in entities[1:4]:
+            for target in entities[1:5]:
                 relations.append(
                     {
                         "source": anchor,
@@ -150,7 +198,74 @@ class Neo4jGraphStore:
                         "target": target,
                     }
                 )
-        return relations
+
+        deduped: List[Dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for relation in relations:
+            key = (relation["source"], relation["relation"], relation["target"])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(relation)
+        return deduped[:12]
+
+    @classmethod
+    def _extract_targets(cls, tail: str, entities: List[str]) -> List[str]:
+        targets: List[str] = []
+        normalized_tail = tail.strip("：:，,。.；;!?！？ ")
+        if not normalized_tail:
+            return []
+
+        for fragment in cls._SPLIT_PATTERN.split(normalized_tail):
+            entity = cls._normalize_entity(fragment)
+            if entity:
+                targets.append(entity)
+
+        if not targets:
+            for entity in entities:
+                if entity and entity in normalized_tail:
+                    targets.append(entity)
+        return cls._dedupe_texts(targets, limit=8)
+
+    @classmethod
+    def _normalize_entity(cls, text: str) -> str:
+        normalized = text.strip().strip("`").strip("，。！？,.!?：:；;()[]{}<>\"'")
+        normalized = re.sub(r"\s+", " ", normalized)
+        if not normalized:
+            return ""
+        normalized = re.sub(r"^([A-Za-z][A-Za-z0-9_\-+.]{1,31})\s+[一二三四五六七八九十0-9]+种.*$", r"\1", normalized)
+        normalized = cls._CANONICAL_ENTITY_MAP.get(normalized, normalized)
+        if len(normalized) < 2 and normalized != "用户":
+            return ""
+        if normalized.lower() in {"thought", "action", "finish", "observation"}:
+            return ""
+        if any(verb in normalized for verb in cls._RELATION_VERBS) and len(normalized) > 2:
+            return ""
+        if normalized in cls._STOPWORDS:
+            return ""
+        if normalized.startswith("请") and len(normalized) > 2:
+            normalized = normalized[1:]
+        if normalized in cls._STOPWORDS:
+            return ""
+        normalized = normalized.strip("的")
+        return normalized
+
+    @staticmethod
+    def _normalize_relation(text: str) -> str:
+        relation = text.strip("：:，,。.；;!?！？ ")
+        relation = relation.replace("爱喝", "喜欢").replace("爱吃", "喜欢")
+        return relation or "related_to"
+
+    @staticmethod
+    def _dedupe_texts(items: List[str], *, limit: int) -> List[str]:
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for item in items:
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+        return deduped[:limit]
 
     def _initialize_backend(self) -> None:
         requested_backend = (self.config.graph_store_backend or "auto").strip().lower()
@@ -255,8 +370,8 @@ class Neo4jGraphStore:
                 """
                 MATCH (m:MemoryFact {session_id: $session_id})-[:MENTIONS]->(e:Entity {session_id: $session_id})
                 WHERE e.name IN $entities
-                RETURN m.payload AS payload, count(DISTINCT e) AS score
-                ORDER BY score DESC, m.created_at DESC
+                RETURN m.payload AS payload, m.created_at AS created_at, count(DISTINCT e) AS score
+                ORDER BY score DESC, created_at DESC
                 LIMIT $limit
                 """,
                 session_id=session_id,

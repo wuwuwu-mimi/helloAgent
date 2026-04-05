@@ -107,12 +107,17 @@ Action: get_time[]
 - 在没有额外服务依赖时自动回退到本地 JSON
 - 同一套向量存储能力同时复用于 `SemanticMemory` 和 `RAG`
 - 通过图谱通道额外保留“谁喜欢什么 / 某系统支持什么”这种关系结构
+- 当前已经增强了启发式实体抽取与关系归纳，重点覆盖：
+  - 用户偏好：如“用户喜欢美式咖啡 / 不喜欢过甜饮品”
+  - 能力支持：如“helloAgent 支持 ReAct / Plan-and-Solve / Reflection”
+  - 系统组成：如“记忆系统包含 WorkingMemory / EpisodicMemory / SemanticMemory”
 
 后续还会继续往这些方向补：
 
 - 更多文档格式解析
 - 基于检索结果的自动答案合成 / 重排
 - 更稳定的图谱实体抽取与关系归纳
+- 更细粒度的关系类型与冲突消解
 
 ## 项目结构
 
