@@ -1,16 +1,51 @@
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from agents.plan_and_solve import PlanAndSolveAgent
 from agents.react_agent import ReactAgent
 from agents.reflection_agent import ReflectionAgent
-from core import Config, HelloAgentsLLM
+from core import ChatResult, Config, HelloAgentsLLM
 from memory import MemoryConfig, MemoryManager
 from memory.rag import RagPipeline
 from tools.builtin.get_time import GetTimeTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.rag_tool import RagTool
 from tools.builtin.toolRegistry import ToolRegistry
+
+
+@dataclass
+class NativeToolCallingSmokeLLM:
+    """
+    一个最小的假 LLM，用来验证原生 tool calling 主链路。
+
+    修改说明：这里不依赖真实模型服务，直接返回“先调用工具、再生成答案”的固定流程，
+    方便测试 schema / 原生 tool calling 的执行路径是否闭环。
+    """
+
+    provider: str = "mock-native"
+
+    def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        tool_messages = [message for message in messages if getattr(message, "role", None) == "tool"]
+        if not tool_messages:
+            return ChatResult(
+                text="",
+                tool_calls=[
+                    {
+                        "id": "call_get_time_001",
+                        "type": "function",
+                        "function": {"name": "get_time", "arguments": ""},
+                    }
+                ],
+                finish_reason="tool_calls",
+            )
+
+        latest_tool_result = tool_messages[-1].content or ""
+        return ChatResult(
+            text=f"我已经通过原生 tool calling 调用了 get_time，结果是：{latest_tool_result}",
+            tool_calls=[],
+            finish_reason="stop",
+        )
 
 
 def configure_logging() -> None:
@@ -587,6 +622,28 @@ def test_summary_smoke() -> None:
     print(rendered or "(没有生成上下文)")
 
 
+def test_native_tool_calling_smoke() -> None:
+    """
+    运行一个原生 tool calling 冒烟测试。
+
+    修改说明：先用假 LLM 走一遍“schema -> tool_calls -> 工具执行 -> tool message 回填 -> 最终回答”，
+    确认现有 Tool 定义已经真正能复用于原生 tool calling 主链路。
+    """
+    config = Config.from_env().model_copy(update={"tool_calling_mode": "native"})
+    registry = ToolRegistry()
+    registry.register_tool(GetTimeTool())
+
+    agent = ReactAgent(
+        name="native_tool_calling_smoke",
+        llm=NativeToolCallingSmokeLLM(),  # type: ignore[arg-type]
+        tool_registry=registry,
+        config=config,
+        max_steps=3,
+    )
+    answer = agent.run("请告诉我当前时间，并说明你是通过工具得到的。")
+    print_run_summary("原生 Tool Calling 测试", answer, agent.current_history)
+
+
 def run_demo(target: str = "reflection") -> None:
     """根据名称运行指定的示例，方便你在一个入口里切换不同 Agent。"""
     demos = {
@@ -601,6 +658,7 @@ def run_demo(target: str = "reflection") -> None:
         "routing_smoke": test_context_routing_smoke,
         "conflict_smoke": test_context_conflict_smoke,
         "summary_smoke": test_summary_smoke,
+        "native_tool_smoke": test_native_tool_calling_smoke,
     }
     if target not in demos:
         raise ValueError(f"不支持的测试目标: {target}，可选值: {', '.join(demos)}")

@@ -76,6 +76,7 @@ class Config(BaseModel):
     context_max_chars: int = 3200
     context_max_sections: int = 6
     context_section_max_chars: int = 1200
+    tool_calling_mode: str = "text"
     auto_memory_context: bool = True
     auto_memory_context_limit: int = 5
     auto_rag_context: bool = True
@@ -109,6 +110,7 @@ class Config(BaseModel):
                 defaults.context_section_max_chars,
                 "CONTEXT_SECTION_MAX_CHARS",
             ),
+            tool_calling_mode=_first_env("TOOL_CALLING_MODE") or defaults.tool_calling_mode,
             auto_memory_context=_read_bool(
                 defaults.auto_memory_context,
                 "AUTO_MEMORY_CONTEXT",

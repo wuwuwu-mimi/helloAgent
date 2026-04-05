@@ -4,7 +4,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from agents.agent_base import Agent
-from core import Config, ContextBuilder, HelloAgentsLLM, Message
+from core import ChatResult, Config, ContextBuilder, HelloAgentsLLM, Message
 from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 
@@ -89,14 +89,23 @@ class ReasoningAgentBase(Agent):
         修改说明：把重复出现的 `llm.chat(...).text.strip()` 抽成公共方法，
         让子类把注意力放在“如何组织流程”而不是“如何发请求”上。
         """
-        result = self.llm.chat(
+        result = self._request_result(prompt, **kwargs)
+        return (result.text or "").strip()
+
+    def _request_result(self, prompt: str, **kwargs: Any) -> ChatResult:
+        """
+        统一调用 LLM，并保留完整结果对象。
+
+        修改说明：后面做原生 tool calling 时，除了文本，还需要拿到 `tool_calls`；
+        所以这里在父类加一个完整结果入口，文本版和 schema 版都可以复用。
+        """
+        return self.llm.chat(
             messages=self._build_messages(prompt),
             stream=False,
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
             **kwargs,
         )
-        return (result.text or "").strip()
 
     def _build_memory_context(self) -> str:
         """读取与当前输入相关的历史记忆，并整理成 prompt 片段。"""

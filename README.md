@@ -20,6 +20,7 @@
 - 一套轻量的上下文工程抽象：`ContextSection / ContextPacket / ContextBuilder`
 - 一个工具基类 `Tool`
 - 一个工具注册器 `ToolRegistry`
+- 一层向原生 `tool calling` 迁移的 schema 复用能力
 - 一个内置示例工具 `get_time`
 - 一个内置记忆工具 `memory_tool`
 - 一个内置检索工具 `rag_tool`
@@ -76,13 +77,13 @@ Action: get_time[]
 
 ## 当前实现风格
 
-这个项目当前采用的是“文本解析版 Agent”，而不是完全依赖原生 function calling。
+这个项目当前仍然以“文本解析版 Agent”为主，但已经开始往原生 tool calling 方向迁移。
 
 也就是说：
 
 - 模型主要输出文本格式的 `Thought / Action`
 - Agent 自己负责解析和控制工具执行
-- 工具系统已经抽成了对象化结构，但 schema / 原生 tool calling 还没有完全接上
+- 工具系统已经抽成了对象化结构，并且已经开始复用到原生 tool calling 链路
 
 这样做的好处是：
 
@@ -90,6 +91,13 @@ Action: get_time[]
 - 容易调试
 - 容易理解每一步到底发生了什么
 - 适合逐步演进到更完整的 Agent 结构
+
+当前迁移到原生 tool calling 的部分是：
+
+- `Tool` 的参数定义会统一导出成 schema
+- `ToolRegistry.get_available_tools()` 会直接生成 OpenAI-compatible `tools` 结构
+- `ReactAgent` 已支持一条“原生 tool calling 主链路”
+- 当前这条链路会优先在标准 `ReactAgent` 上启用；`Plan-and-Solve / Reflection` 仍以文本解析链路为主
 
 ## 当前的记忆系统进展
 
@@ -366,6 +374,18 @@ TOOL_CONTEXT_OBSERVATION_LIMIT=4
 ENABLE_CONTEXT_CONFLICT_RESOLUTION=true
 ```
 
+如果你想切换原生 tool calling 模式，也可以增加：
+
+```env
+TOOL_CALLING_MODE=text
+```
+
+当前可选值可以理解为：
+
+- `text`：继续走原来的文本 `Thought / Action`
+- `native`：在标准 `ReactAgent` 上启用原生 tool calling
+- `auto`：当前行为与 `native` 接近，作为后续扩展保留
+
 如果你想调整会话摘要行为，也可以继续加上这些可选配置：
 
 ```env
@@ -464,6 +484,15 @@ main.configure_logging()
 main.run_demo("summary_smoke")
 ```
 
+如果你想看“现有 Tool schema 如何复用到原生 tool calling 主链路”，可以执行：
+
+```python
+import main
+
+main.configure_logging()
+main.run_demo("native_tool_smoke")
+```
+
 如果配置正确，终端会输出：
 
 - 最终答案
@@ -518,6 +547,12 @@ main.run_demo("summary_smoke")
 - 摘要被注入后的完整上下文
 - 摘要层与原始结构化记忆层是如何同时存在的
 
+在 `native_tool_smoke` 演示里，会直接看到：
+
+- 模型返回的 `tool_calls`
+- 工具被执行后的 Observation
+- tool message 回填后生成的最终答案
+
 如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
 ## 当前支持的 Provider 方向
@@ -543,6 +578,7 @@ main.run_demo("summary_smoke")
 
 - 仍然偏学习 / 实验用途，不是生产框架
 - schema 和原生 tool calling 还没有完全接上
+- 原生 tool calling 当前主要先接在标准 `ReactAgent` 上
 - 工具系统目前比较轻量
 - 测试还不够系统化
 - 上下文工程目前还是轻量版，虽然已经有字符预算与去重，但还没有做真正的 token 预算
