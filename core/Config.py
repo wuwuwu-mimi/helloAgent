@@ -73,6 +73,9 @@ class Config(BaseModel):
     debug: bool = False
     log_level: str = "INFO"
     max_history_length: int = 100
+    context_max_chars: int = 3200
+    context_max_sections: int = 6
+    context_section_max_chars: int = 1200
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -94,6 +97,12 @@ class Config(BaseModel):
             debug=_read_bool(defaults.debug, "DEBUG"),
             log_level=_first_env("LOG_LEVEL") or defaults.log_level,
             max_history_length=_read_int(defaults.max_history_length, "MAX_HISTORY_LENGTH"),
+            context_max_chars=_read_int(defaults.context_max_chars, "CONTEXT_MAX_CHARS"),
+            context_max_sections=_read_int(defaults.context_max_sections, "CONTEXT_MAX_SECTIONS"),
+            context_section_max_chars=_read_int(
+                defaults.context_section_max_chars,
+                "CONTEXT_SECTION_MAX_CHARS",
+            ),
         )
 
     def llm_options(self) -> Dict[str, Any]:

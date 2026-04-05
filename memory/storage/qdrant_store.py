@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from hashlib import md5
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -15,6 +16,8 @@ try:
 except ImportError:  # pragma: no cover - 当前环境可能未安装 qdrant-client
     QdrantClient = None
     qdrant_models = None
+
+logger = logging.getLogger(__name__)
 
 
 class QdrantVectorStore:
@@ -226,7 +229,8 @@ class QdrantVectorStore:
                 self.client = QdrantClient(path=local_path)
             self._ensure_qdrant_collection()
             return True
-        except Exception:
+        except Exception as exc:
+            logger.warning("Qdrant 初始化失败，已回退到 JSON 存储：%s", exc)
             self.client = None
             return False
 
@@ -234,14 +238,24 @@ class QdrantVectorStore:
         if self.client is None or qdrant_models is None:
             return
         collections = self.client.get_collections().collections
+        expected_size = self._resolve_vector_size()
         if not any(item.name == self.collection_name for item in collections):
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=qdrant_models.VectorParams(
-                    size=self.config.embedding_dimensions,
+                    size=expected_size,
                     distance=qdrant_models.Distance.COSINE,
                 ),
             )
+        else:
+            collection_info = self.client.get_collection(self.collection_name)
+            current_size = self._extract_collection_vector_size(collection_info)
+            if current_size is not None and current_size != expected_size:
+                raise ValueError(
+                    f"Qdrant collection `{self.collection_name}` 的向量维度是 {current_size}，"
+                    f"但当前 embedding 维度是 {expected_size}。"
+                    "请使用单独的 collection 名称，或切回匹配的 embedding 配置。"
+                )
 
         # 修改说明：云端 Qdrant 对过滤字段通常要求先建 payload index，
         # 否则按 `session_id` / `source` 过滤删除或检索时会直接报 400。
@@ -341,6 +355,33 @@ class QdrantVectorStore:
         except ValueError:
             stable_key = f"{self.collection_name}:{text}"
             return str(uuid5(NAMESPACE_URL, stable_key))
+
+    def _resolve_vector_size(self) -> int:
+        """
+        解析当前 collection 应使用的向量维度。
+
+        修改说明：接入 Ollama embedding 后，维度可能不再是固定的 96；
+        这里优先读取 embedding service 的维度提示，避免 Qdrant collection 建错尺寸。
+        """
+        hinted_size = self.embedding_service.dimension_hint()
+        if hinted_size and hinted_size > 0:
+            return hinted_size
+        return self.config.embedding_dimensions
+
+    @staticmethod
+    def _extract_collection_vector_size(collection_info: Any) -> int | None:
+        """尽量从 Qdrant collection 配置里提取当前向量维度。"""
+        vectors = getattr(getattr(collection_info, "config", None), "params", None)
+        vectors = getattr(vectors, "vectors", None)
+        if vectors is None:
+            return None
+        if hasattr(vectors, "size"):
+            return int(vectors.size)
+        if isinstance(vectors, dict):
+            first_value = next(iter(vectors.values()), None)
+            if first_value is not None and hasattr(first_value, "size"):
+                return int(first_value.size)
+        return None
 
     def _qdrant_clear(self, *, filters: Dict[str, Any]) -> None:
         if self.client is None or qdrant_models is None:

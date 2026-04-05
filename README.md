@@ -25,6 +25,7 @@
 - 一个内置检索工具 `rag_tool`
 - 一个统一的 OpenAI-compatible LLM 调用层
 - 一个本地可运行的离线 embedding 实现
+- 一个可选的本地 `Ollama embedding` 接入层
 - 一个 Qdrant 适配层：有真实 Qdrant 配置时优先接入，否则自动回退到本地 JSON
 - 一个 Neo4j 图谱适配层：有真实 Neo4j 配置时优先接入，否则自动回退到本地 JSON
 - 一个最小可用的本地 RAG pipeline（文档切片 / 索引 / 检索 / 重排 / 上下文拼装）
@@ -137,6 +138,37 @@ Action: get_time[]
 - 多来源上下文去重
 - 更明确的优先级策略
 - 检索结果与历史记忆的合并策略
+
+当前这个版本还补了一层非常实用的“预算控制”：
+
+- `ContextPacket.render(...)` 已支持总字符预算、最大 section 数量、单 section 字符上限
+- 重复 section 会在渲染前自动去重
+- `ReasoningAgentBase` 会按 `Config` 里的预算参数统一裁剪上下文，避免 prompt 无限膨胀
+
+## 当前的 embedding 进展
+
+现在项目里有两种 embedding 方案：
+
+- `hash`：完全离线、零依赖，适合先把链路跑通
+- `ollama`：直接复用本地 Ollama embedding 模型，适合提升记忆召回和 RAG 检索质量
+
+如果你本地已经有 Ollama embedding 模型，比如：
+
+- `bge-m3:latest`
+- `mxbai-embed-large:latest`
+
+那么可以直接把记忆系统和 RAG 切到真实 embedding。
+
+需要注意的一点是：
+
+- 如果你之前用的是 `hash` embedding，并且已经把 Qdrant collection 建成了 `96` 维
+- 现在切到 Ollama embedding 后，向量维度通常会变化
+- 这时最好为新的 embedding 模型单独使用新的 Qdrant collection 名称，避免维度不匹配
+
+当前代码已经补了一层保护：
+
+- `QdrantVectorStore` 会检查 collection 的向量维度是否和当前 embedding 一致
+- 如果不一致，会给出明确提示，并自动回退到 JSON fallback，而不是直接异常崩掉
 
 ## 项目结构
 
@@ -252,6 +284,24 @@ QDRANT_RAG_COLLECTION=rag_chunks
 
 如果你不配置 `QDRANT_URL`，或者本地没有安装 `qdrant-client`，项目会自动回退到 JSON 向量存储。
 
+如果你本地已经装了 Ollama，并希望直接使用本地 embedding 模型，可以额外加上：
+
+```env
+EMBEDDING_BACKEND=ollama
+OLLAMA_EMBEDDING_MODEL=bge-m3:latest
+OLLAMA_EMBEDDING_BASE_URL=http://127.0.0.1:11434
+OLLAMA_EMBEDDING_TIMEOUT_SECONDS=30
+```
+
+如果你同时还在用 Qdrant，建议把 collection 分开，例如：
+
+```env
+QDRANT_SEMANTIC_COLLECTION=semantic_memory_bge_m3
+QDRANT_RAG_COLLECTION=rag_chunks_bge_m3
+```
+
+这样可以避免不同 embedding 维度共用同一个 collection。
+
 如果你想启用真实 Neo4j，可以继续加上这些可选配置：
 
 ```env
@@ -296,6 +346,15 @@ main.configure_logging()
 main.run_demo("rag_smoke")
 ```
 
+如果你想先检查当前 embedding 后端本身是否工作正常，可以执行：
+
+```python
+import main
+
+main.configure_logging()
+main.run_demo("embedding_smoke")
+```
+
 如果配置正确，终端会输出：
 
 - 最终答案
@@ -312,9 +371,17 @@ main.run_demo("rag_smoke")
 在 `rag_smoke` 演示里，会直接看到：
 
 - 当前启用的向量后端
+- 当前启用的 embedding 后端
 - 写入的切片数量
 - 已索引的来源列表
 - `ContextBuilder` 生成的结构化检索上下文
+
+在 `embedding_smoke` 演示里，会直接看到：
+
+- 当前 embedding 后端
+- 当前向量维度
+- 相近文本相似度
+- 无关文本相似度
 
 如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
@@ -343,7 +410,7 @@ main.run_demo("rag_smoke")
 - schema 和原生 tool calling 还没有完全接上
 - 工具系统目前比较轻量
 - 测试还不够系统化
-- 上下文工程目前还是轻量版，还没有做 token 预算与自动裁剪
+- 上下文工程目前还是轻量版，虽然已经有字符预算与去重，但还没有做真正的 token 预算
 - 文档会继续补充，目录结构也可能继续调整
 
 ## 接下来准备继续做的事情

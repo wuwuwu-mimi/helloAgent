@@ -1,5 +1,10 @@
 from .base import BaseMemory, MemoryConfig, MemoryItem
-from .embedding import BaseEmbeddingService, EmbeddingServiceFactory, HashEmbeddingService
+from .embedding import (
+    BaseEmbeddingService,
+    EmbeddingServiceFactory,
+    HashEmbeddingService,
+    OllamaEmbeddingService,
+)
 from .manager import MemoryManager
 
 __all__ = [
@@ -7,6 +12,7 @@ __all__ = [
     "BaseEmbeddingService",
     "EmbeddingServiceFactory",
     "HashEmbeddingService",
+    "OllamaEmbeddingService",
     "MemoryConfig",
     "MemoryItem",
     "MemoryManager",

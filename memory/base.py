@@ -59,6 +59,9 @@ class MemoryConfig(BaseModel):
     graph_recall_top_k: int = 3
     embedding_backend: str = "hash"
     embedding_dimensions: int = 96
+    ollama_embedding_base_url: str = "http://127.0.0.1:11434"
+    ollama_embedding_model: str = ""
+    ollama_embedding_timeout_seconds: float = 30.0
     rag_store_path: str = "data/rag_index.json"
     rag_chunk_size: int = 300
     rag_chunk_overlap: int = 60
@@ -122,6 +125,21 @@ class MemoryConfig(BaseModel):
             embedding_dimensions=_read_int(
                 defaults.embedding_dimensions,
                 "EMBEDDING_DIMENSIONS",
+            ),
+            ollama_embedding_base_url=_first_env(
+                "OLLAMA_EMBEDDING_BASE_URL",
+                "OLLAMA_BASE_URL",
+            )
+            or defaults.ollama_embedding_base_url,
+            ollama_embedding_model=_first_env(
+                "OLLAMA_EMBEDDING_MODEL",
+                "EMBEDDING_MODEL",
+            )
+            or defaults.ollama_embedding_model,
+            ollama_embedding_timeout_seconds=_read_float(
+                defaults.ollama_embedding_timeout_seconds,
+                "OLLAMA_EMBEDDING_TIMEOUT_SECONDS",
+                "OLLAMA_TIMEOUT_SECONDS",
             ),
             rag_store_path=_first_env("RAG_STORE_PATH") or defaults.rag_store_path,
             rag_chunk_size=_read_int(defaults.rag_chunk_size, "RAG_CHUNK_SIZE"),

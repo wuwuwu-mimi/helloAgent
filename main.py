@@ -48,6 +48,20 @@ def build_memory_manager() -> MemoryManager:
     return MemoryManager(MemoryConfig.from_env())
 
 
+def describe_embedding_backend(memory_manager: MemoryManager) -> str:
+    """
+    返回当前 embedding 后端的简要说明。
+
+    修改说明：后面接入本地 Ollama embedding 后，测试输出里需要明确看到
+    “现在到底是 hash 还是 ollama，在用哪个模型”，排查会快很多。
+    """
+    config = memory_manager.config
+    backend = (config.embedding_backend or "hash").strip().lower()
+    if backend == "ollama":
+        return f"ollama | model={config.ollama_embedding_model or '(未配置)'} | base_url={config.ollama_embedding_base_url}"
+    return f"{backend} | dimensions={config.embedding_dimensions}"
+
+
 def build_rag_pipeline(memory_manager: MemoryManager) -> RagPipeline:
     """
     创建默认的 RAG 管道。
@@ -326,11 +340,42 @@ def test_rag_pipeline_smoke() -> None:
     print("\n" + "=" * 24)
     print("RAG Pipeline 冒烟测试")
     print("=" * 24)
+    print(f"Embedding 后端: {describe_embedding_backend(memory_manager)}")
     print(f"向量后端: {rag_pipeline.store.backend}")
     print(f"写入切片数: {count}")
     print(f"已索引来源: {', '.join(rag_pipeline.list_sources()) or '(空)'}")
     print("\n结构化上下文：")
     print(answer_context or "(没有生成上下文)")
+
+
+def test_embedding_smoke() -> None:
+    """
+    运行一个 embedding 冒烟测试。
+
+    修改说明：本地已有 Ollama embedding 模型时，可以先跑这个最小测试，
+    确认向量生成和相似度趋势正常，再去联调记忆和 RAG。
+    """
+    memory_manager = build_memory_manager()
+    embedding_service = memory_manager.embedding_service
+
+    text_a = "用户喜欢美式咖啡，不喜欢过甜饮品。"
+    text_b = "这个用户偏好黑咖啡，讨厌太甜的饮料。"
+    text_c = "今天上海的天气比较晴朗。"
+
+    vector_a = embedding_service.embed(text_a)
+    vector_b = embedding_service.embed(text_b)
+    vector_c = embedding_service.embed(text_c)
+
+    similar_score = embedding_service.cosine_similarity(vector_a, vector_b)
+    unrelated_score = embedding_service.cosine_similarity(vector_a, vector_c)
+
+    print("\n" + "=" * 24)
+    print("Embedding 冒烟测试")
+    print("=" * 24)
+    print(f"Embedding 后端: {describe_embedding_backend(memory_manager)}")
+    print(f"向量维度: {len(vector_a)}")
+    print(f"相近文本相似度: {similar_score:.4f}")
+    print(f"无关文本相似度: {unrelated_score:.4f}")
 
 
 def run_demo(target: str = "reflection") -> None:
@@ -342,6 +387,7 @@ def run_demo(target: str = "reflection") -> None:
         "memory": test_memory_workflow,
         "rag": test_rag_workflow,
         "rag_smoke": test_rag_pipeline_smoke,
+        "embedding_smoke": test_embedding_smoke,
     }
     if target not in demos:
         raise ValueError(f"不支持的测试目标: {target}，可选值: {', '.join(demos)}")

@@ -58,17 +58,76 @@ class ContextPacket:
             )
 
     def ordered_sections(self) -> List[ContextSection]:
-        return sorted(
+        ordered = sorted(
             self.sections,
             key=lambda item: (item.priority, item.title),
             reverse=True,
         )
+        deduped: List[ContextSection] = []
+        seen: set[tuple[str, str]] = set()
+        for section in ordered:
+            signature = (section.title.strip(), section.content.strip())
+            if signature in seen:
+                continue
+            seen.add(signature)
+            deduped.append(section)
+        return deduped
 
-    def render(self) -> str:
+    def render(
+        self,
+        *,
+        max_chars: int | None = None,
+        max_sections: int | None = None,
+        section_max_chars: int | None = None,
+    ) -> str:
         ordered = self.ordered_sections()
         if not ordered:
             return ""
-        return "\n\n".join(section.render() for section in ordered)
+
+        rendered_sections: List[str] = []
+        remaining_chars = max_chars if max_chars and max_chars > 0 else None
+        section_limit = max_sections if max_sections and max_sections > 0 else None
+        per_section_limit = section_max_chars if section_max_chars and section_max_chars > 0 else None
+
+        for section in ordered:
+            if section_limit is not None and len(rendered_sections) >= section_limit:
+                break
+
+            rendered = self._render_section(section, per_section_limit)
+            if not rendered:
+                continue
+
+            if remaining_chars is None:
+                rendered_sections.append(rendered)
+                continue
+
+            separator_length = 2 if rendered_sections else 0
+            if remaining_chars <= separator_length:
+                break
+            allowed_length = remaining_chars - separator_length
+            if len(rendered) > allowed_length:
+                rendered = self._clip_text(rendered, allowed_length)
+                if not rendered:
+                    break
+            rendered_sections.append(rendered)
+            remaining_chars -= len(rendered) + separator_length
+
+        return "\n\n".join(rendered_sections)
+
+    @classmethod
+    def _render_section(cls, section: ContextSection, section_max_chars: int | None) -> str:
+        content = cls._clip_text(section.content.strip(), section_max_chars)
+        if not content:
+            return ""
+        return f"[{section.title}]\n{content}"
+
+    @staticmethod
+    def _clip_text(text: str, limit: int | None) -> str:
+        if limit is None or limit <= 0 or len(text) <= limit:
+            return text
+        if limit <= 1:
+            return text[:limit]
+        return f"{text[: limit - 1].rstrip()}…"
 
 
 class ContextBuilder:

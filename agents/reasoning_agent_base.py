@@ -49,7 +49,11 @@ class ReasoningAgentBase(Agent):
         """把本轮 prompt 包装成发给 LLM 的消息列表。"""
         messages: List[Message] = []
         context_packet = self._build_context_packet()
-        rendered_context = context_packet.render()
+        rendered_context = context_packet.render(
+            max_chars=self.config.context_max_chars,
+            max_sections=self.config.context_max_sections,
+            section_max_chars=self.config.context_section_max_chars,
+        )
         if rendered_context:
             # 修改说明：把 system prompt、记忆和运行规则都收敛到结构化上下文里，
             # 这样后续继续做上下文裁剪、优先级合并时不需要重写消息拼装逻辑。
