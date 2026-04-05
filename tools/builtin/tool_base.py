@@ -11,6 +11,52 @@ class ToolValidationError(ValueError):
     """工具参数不符合 schema 时抛出的统一异常。"""
 
 
+class ToolResult(BaseModel):
+    """
+    统一的工具执行结果协议。
+
+    修改说明：先把工具结果收敛成 `success / content / data / error / meta` 五个核心字段，
+    这样 Agent、日志、记忆和后续失败恢复逻辑都能围绕同一份结果对象协作。
+    """
+
+    success: bool = True
+    content: str = ""
+    data: Any = None
+    error: str = ""
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def ok(
+        cls,
+        content: str = "",
+        *,
+        data: Any = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> "ToolResult":
+        """构造一个成功结果。"""
+        return cls(success=True, content=content, data=data, meta=meta or {})
+
+    @classmethod
+    def fail(
+        cls,
+        error: str,
+        *,
+        content: str = "",
+        data: Any = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> "ToolResult":
+        """构造一个失败结果。"""
+        return cls(success=False, content=content, data=data, error=error, meta=meta or {})
+
+    def render_for_observation(self) -> str:
+        """把工具结果渲染成适合回填给 Agent 的 Observation 文本。"""
+        if self.success:
+            return self.content or "Tool returned empty output."
+        if self.error and self.content:
+            return f"{self.error}\n{self.content}"
+        return self.error or self.content or "Tool execution failed."
+
+
 class ToolParameter(BaseModel):
     """
     定义工具参数，便于统一生成说明文本和参数 Schema。
@@ -36,12 +82,21 @@ class Tool(ABC):
         self.description = description
 
     @abstractmethod
-    def run(self, parameters: Dict[str, Any]) -> str:
-        """执行工具，并返回字符串结果。"""
+    def run(self, parameters: Dict[str, Any]) -> Any:
+        """执行工具，并返回字符串或 `ToolResult`。"""
 
     @abstractmethod
     def get_parameters(self) -> List[ToolParameter]:
         """返回工具参数定义列表。"""
+
+    def execute(self, parameters: Dict[str, Any]) -> ToolResult:
+        """
+        统一执行工具并返回 `ToolResult`。
+
+        修改说明：保留各工具的 `run()` 简单接口，但真正给 Agent 使用时统一走 `execute()`，
+        这样老工具不用一次性全部重写，新老返回格式也能平滑兼容。
+        """
+        return self._coerce_result(self.run(parameters))
 
     def get_parameters_schema(self) -> Dict[str, Any]:
         """
@@ -227,3 +282,34 @@ class Tool(ABC):
             for item in parameters
         )
         return f"- {self.name}: {self.description} 参数: {parameter_text}"
+
+    def _coerce_result(self, result: Any) -> ToolResult:
+        """把旧工具返回的字符串 / 字典 / ToolResult 统一包装成 `ToolResult`。"""
+        if isinstance(result, ToolResult):
+            return result
+
+        if result is None:
+            return ToolResult.ok("")
+
+        if isinstance(result, str):
+            return ToolResult.ok(result)
+
+        if isinstance(result, dict):
+            success = bool(result.get("success", True))
+            content = str(result.get("content", "") or "")
+            error = str(result.get("error", "") or "")
+            data = result.get("data")
+            meta = result.get("meta")
+            if isinstance(meta, dict):
+                payload_meta = meta
+            else:
+                payload_meta = {}
+            return ToolResult(
+                success=success,
+                content=content,
+                error=error,
+                data=data,
+                meta=payload_meta,
+            )
+
+        return ToolResult.ok(str(result), data=result)

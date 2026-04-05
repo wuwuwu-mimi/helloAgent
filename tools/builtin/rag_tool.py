@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from memory.rag import RagPipeline
-from tools.builtin.tool_base import Tool, ToolParameter
+from tools.builtin.tool_base import Tool, ToolParameter, ToolResult
 
 
 class RagTool(Tool):
@@ -16,7 +16,7 @@ class RagTool(Tool):
         )
         self.rag_pipeline = rag_pipeline
 
-    def run(self, parameters: Dict[str, Any]) -> str:
+    def run(self, parameters: Dict[str, Any]) -> ToolResult:
         """
         支持五种动作：
         - add: 把本地文档切片并建立索引
@@ -31,46 +31,103 @@ class RagTool(Tool):
         if action == "add":
             path = str(parameters.get("path", "")).strip()
             if not path:
-                return "rag_tool add 需要提供 path。"
+                return ToolResult.fail(
+                    "rag_tool add 需要提供 path。",
+                    meta={"tool": "rag_tool", "action": action},
+                )
             count = self.rag_pipeline.add_document(path)
-            return f"已索引文档 `{path}`，共写入 {count} 个切片。"
+            return ToolResult.ok(
+                f"已索引文档 `{path}`，共写入 {count} 个切片。",
+                data={"path": path, "chunk_count": count},
+                meta={"tool": "rag_tool", "action": action, "written": count},
+            )
 
         if action == "search":
             query = str(parameters.get("query", "")).strip()
             if not query:
-                return "rag_tool search 需要提供 query。"
+                return ToolResult.fail(
+                    "rag_tool search 需要提供 query。",
+                    meta={"tool": "rag_tool", "action": action},
+                )
             matches = self.rag_pipeline.search(query, limit=limit)
             if not matches:
-                return "没有检索到相关文档。"
-            return "\n\n".join(
+                return ToolResult.ok(
+                    "没有检索到相关文档。",
+                    data={"query": query, "matches": []},
+                    meta={"tool": "rag_tool", "action": action, "count": 0},
+                )
+            content = "\n\n".join(
                 f"来源: {item.chunk.source} | 分数: {item.score:.4f}\n{item.chunk.content}"
                 for item in matches
+            )
+            return ToolResult.ok(
+                content,
+                data={
+                    "query": query,
+                    "matches": [item.model_dump() for item in matches],
+                },
+                meta={"tool": "rag_tool", "action": action, "count": len(matches)},
             )
 
         if action == "answer":
             query = str(parameters.get("query", "")).strip()
             if not query:
-                return "rag_tool answer 需要提供 query。"
-            return self.rag_pipeline.answer(query, limit=limit)
+                return ToolResult.fail(
+                    "rag_tool answer 需要提供 query。",
+                    meta={"tool": "rag_tool", "action": action},
+                )
+            answer = self.rag_pipeline.answer(query, limit=limit)
+            return ToolResult.ok(
+                answer,
+                data={"query": query, "answer": answer},
+                meta={"tool": "rag_tool", "action": action, "limit": limit},
+            )
 
         if action == "context":
             query = str(parameters.get("query", "")).strip()
             if not query:
-                return "rag_tool context 需要提供 query。"
+                return ToolResult.fail(
+                    "rag_tool context 需要提供 query。",
+                    meta={"tool": "rag_tool", "action": action},
+                )
             matches = self.rag_pipeline.search(query, limit=limit)
             if not matches:
-                return "没有检索到相关文档。"
-            return self.rag_pipeline.build_answer_context(query=query, matches=matches)
+                return ToolResult.ok(
+                    "没有检索到相关文档。",
+                    data={"query": query, "matches": []},
+                    meta={"tool": "rag_tool", "action": action, "count": 0},
+                )
+            context = self.rag_pipeline.build_answer_context(query=query, matches=matches)
+            return ToolResult.ok(
+                context,
+                data={
+                    "query": query,
+                    "matches": [item.model_dump() for item in matches],
+                },
+                meta={"tool": "rag_tool", "action": action, "count": len(matches)},
+            )
 
         if action == "clear":
             self.rag_pipeline.clear()
-            return "当前 RAG 索引已清空。"
+            return ToolResult.ok(
+                "当前 RAG 索引已清空。",
+                meta={"tool": "rag_tool", "action": action, "cleared": True},
+            )
 
         if action == "sources":
             sources = self.rag_pipeline.list_sources()
-            return "\n".join(sources) if sources else "当前还没有已索引文档。"
+            content = "\n".join(sources) if sources else "当前还没有已索引文档。"
+            return ToolResult.ok(
+                content,
+                data={"sources": sources},
+                meta={"tool": "rag_tool", "action": action, "count": len(sources)},
+            )
 
-        return f"不支持的 rag_tool action: {action}"
+        return ToolResult.fail(
+            f"不支持的 rag_tool action: {action}",
+            data={"action": action},
+            meta={"tool": "rag_tool", "action": action},
+        )
 
     def get_parameters(self) -> List[ToolParameter]:
         return [

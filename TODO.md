@@ -13,7 +13,8 @@
   - 补充原生 `tool calling` 下的参数错误反馈
 
 - [ ] 统一工具执行结果协议
-  - 约定 `success / data / error / meta` 之类的返回结构
+  - [x] 引入第一版 `ToolResult(success/content/data/error/meta)` 统一结果对象
+  - [ ] 让更多工具显式返回结构化结果，而不是只返回字符串
   - 减少 Agent 直接依赖“工具只返回字符串”的隐式约定
   - 为日志、记忆写入、失败恢复打基础
 

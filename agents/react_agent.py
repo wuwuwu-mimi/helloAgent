@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from core import Config, HelloAgentsLLM, Message
 from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
-from tools.builtin.tool_base import Tool, ToolValidationError
+from tools.builtin.tool_base import Tool, ToolResult, ToolValidationError
 
 from .reasoning_agent_base import ReasoningAgentBase
 
@@ -209,14 +209,25 @@ class ReactAgent(ReasoningAgentBase):
         try:
             parameters = self._prepare_tool_parameters(tool, action_input)
             logger.debug("工具 `%s` 解析后的参数: %r", action_type, parameters)
-            output = tool.run(parameters)
-            output = output if output is not None else ""
-            logger.info("工具 `%s` 执行结果: %s", action_type, self._preview(str(output)))
-            self._remember_tool_observation(action_type, str(output))
-            return str(output) or "Tool returned empty output."
+            result = tool.execute(parameters)
+            logger.info("工具 `%s` 执行结果: %s", action_type, self._preview(result.render_for_observation()))
+            return self._handle_tool_result(action_type, result)
         except Exception as exc:  # noqa: BLE001 - 工具错误应当回传给模型继续推理
             logger.exception("tool %s execution failed", action_type)
             return f"Tool '{action_type}' failed: {exc}"
+
+    def _handle_tool_result(self, tool_name: str, result: ToolResult) -> str:
+        """
+        统一消费工具结果协议。
+
+        修改说明：Agent 不再假设工具只会返回字符串，而是统一围绕 `ToolResult`
+        做 Observation 渲染、错误拼装和成功结果记忆。
+        """
+        observation = result.render_for_observation()
+        if result.success:
+            self._remember_tool_observation(tool_name, observation)
+            return observation
+        return f"Tool '{tool_name}' failed: {observation}"
 
     def _prepare_tool_parameters(self, tool: Tool, action_input: Optional[str]) -> Dict[str, Any]:
         """

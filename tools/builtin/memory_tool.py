@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from memory.manager import MemoryManager
-from tools.builtin.tool_base import Tool, ToolParameter
+from tools.builtin.tool_base import Tool, ToolParameter, ToolResult
 
 
 class MemoryTool(Tool):
@@ -17,7 +17,7 @@ class MemoryTool(Tool):
         self.memory_manager = memory_manager
         self.session_id = session_id
 
-    def run(self, parameters: Dict[str, Any]) -> str:
+    def run(self, parameters: Dict[str, Any]) -> ToolResult:
         """
         支持四种动作：
         - recent: 查看最近记忆
@@ -32,7 +32,11 @@ class MemoryTool(Tool):
 
         if action == "recent":
             items = self.memory_manager.recall(session_id=self.session_id, limit=limit)
-            return self._format_items(items)
+            return ToolResult.ok(
+                self._format_items(items),
+                data={"items": [item.model_dump() for item in items]},
+                meta={"tool": "memory_tool", "action": action, "count": len(items)},
+            )
 
         if action == "search":
             query = str(parameters.get("query", "")).strip()
@@ -41,7 +45,11 @@ class MemoryTool(Tool):
                 query=query,
                 limit=limit,
             )
-            return self._format_items(items)
+            return ToolResult.ok(
+                self._format_items(items),
+                data={"query": query, "items": [item.model_dump() for item in items]},
+                meta={"tool": "memory_tool", "action": action, "count": len(items)},
+            )
 
         if action == "context":
             query = str(parameters.get("query", "")).strip()
@@ -51,7 +59,12 @@ class MemoryTool(Tool):
                 exclude_text=query or None,
                 limit=limit,
             )
-            return rendered or "没有找到相关记忆。"
+            content = rendered or "没有找到相关记忆。"
+            return ToolResult.ok(
+                content,
+                data={"query": query, "context": content},
+                meta={"tool": "memory_tool", "action": action},
+            )
 
         if action == "summary":
             query = str(parameters.get("query", "")).strip()
@@ -60,25 +73,44 @@ class MemoryTool(Tool):
                 query=query or None,
                 exclude_text=query or None,
             )
-            return rendered or "当前还没有足够的会话内容可供摘要。"
+            content = rendered or "当前还没有足够的会话内容可供摘要。"
+            return ToolResult.ok(
+                content,
+                data={"query": query, "summary": content},
+                meta={"tool": "memory_tool", "action": action},
+            )
 
         if action == "remember":
             content = str(parameters.get("content", "")).strip()
             if not content:
-                return "memory_tool remember 需要提供 content。"
+                return ToolResult.fail(
+                    "memory_tool remember 需要提供 content。",
+                    meta={"tool": "memory_tool", "action": action},
+                )
             self.memory_manager.record_message(
                 session_id=self.session_id,
                 role="assistant",
                 content=content,
                 metadata={"source": "memory_tool"},
             )
-            return f"已写入记忆: {content}"
+            return ToolResult.ok(
+                f"已写入记忆: {content}",
+                data={"content": content},
+                meta={"tool": "memory_tool", "action": action, "written": True},
+            )
 
         if action == "clear":
             self.memory_manager.clear_session(self.session_id)
-            return "当前会话记忆已清空。"
+            return ToolResult.ok(
+                "当前会话记忆已清空。",
+                meta={"tool": "memory_tool", "action": action, "cleared": True},
+            )
 
-        return f"不支持的 memory_tool action: {action}"
+        return ToolResult.fail(
+            f"不支持的 memory_tool action: {action}",
+            data={"action": action},
+            meta={"tool": "memory_tool", "action": action},
+        )
 
     def get_parameters(self) -> List[ToolParameter]:
         return [

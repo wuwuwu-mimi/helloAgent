@@ -12,7 +12,7 @@ from memory.rag import RagPipeline
 from tools.builtin.get_time import GetTimeTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.rag_tool import RagTool
-from tools.builtin.tool_base import Tool, ToolParameter, ToolValidationError
+from tools.builtin.tool_base import Tool, ToolParameter, ToolResult, ToolValidationError
 from tools.builtin.toolRegistry import ToolRegistry
 
 
@@ -148,12 +148,17 @@ class SchemaSmokeTool(Tool):
             description="用于验证工具 schema 校验与参数归一化的演示工具。",
         )
 
-    def run(self, parameters: dict[str, object]) -> str:
+    def run(self, parameters: dict[str, object]) -> ToolResult:
         """把归一化后的参数直接格式化输出，方便在 smoke test 里观察。"""
-        return (
+        content = (
             f"mode={parameters.get('mode')} | "
             f"level={parameters.get('level')} | "
             f"dry_run={parameters.get('dry_run')}"
+        )
+        return ToolResult.ok(
+            content,
+            data=dict(parameters),
+            meta={"tool": "schema_smoke_tool"},
         )
 
     def get_parameters(self) -> list[ToolParameter]:
@@ -846,8 +851,11 @@ def test_tool_schema_smoke() -> None:
     print(tool.get_parameters_schema())
     print("\n归一化后的参数：")
     print(valid_parameters)
-    print("工具执行结果：")
-    print(tool.run(valid_parameters))
+    tool_result = tool.execute(valid_parameters)
+    print("工具执行结果协议：")
+    print(tool_result.model_dump())
+    print("Observation 文本：")
+    print(tool_result.render_for_observation())
 
     print("\n非法参数示例：")
     try:

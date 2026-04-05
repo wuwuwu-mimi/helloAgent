@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List
 
-from tools.builtin.tool_base import Tool, ToolParameter
+from tools.builtin.tool_base import Tool, ToolParameter, ToolResult
 
 
 def get_time() -> str:
@@ -21,7 +21,7 @@ class GetTimeTool(Tool):
             description="获取当前本地时间。",
         )
 
-    def run(self, parameters: Dict[str, Any]) -> str:
+    def run(self, parameters: Dict[str, Any]) -> ToolResult:
         """
         当前工具不需要参数。
 
@@ -29,7 +29,12 @@ class GetTimeTool(Tool):
         方便注册器和 Agent 用统一方式调用。
         """
         del parameters
-        return get_time()
+        now_text = get_time()
+        return ToolResult.ok(
+            now_text,
+            data={"timezone_time": now_text},
+            meta={"tool": "get_time"},
+        )
 
     def get_parameters(self) -> List[ToolParameter]:
         """当前工具没有参数，因此返回空列表。"""
