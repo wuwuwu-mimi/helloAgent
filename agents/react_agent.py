@@ -160,6 +160,7 @@ class ReactAgent(ReasoningAgentBase):
             output = tool.run(parameters)
             output = output if output is not None else ""
             logger.info("工具 `%s` 执行结果: %s", action_type, self._preview(str(output)))
+            self._remember_tool_observation(action_type, str(output))
             return str(output) or "Tool returned empty output."
         except Exception as exc:  # noqa: BLE001 - 工具错误应当回传给模型继续推理
             logger.exception("tool %s execution failed", action_type)

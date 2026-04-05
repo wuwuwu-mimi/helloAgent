@@ -145,6 +145,12 @@ Action: get_time[]
 - 重复 section 会在渲染前自动去重
 - `ReasoningAgentBase` 会按 `Config` 里的预算参数统一裁剪上下文，避免 prompt 无限膨胀
 
+同时，这一层已经开始和 Agent 主循环真正接起来了：
+
+- 如果当前注册了 `rag_tool`，并且本地已经有可检索文档，`ReasoningAgentBase` 会在发起推理前自动补一层 `RAG context`
+- 当前运行中已经执行过的工具 Observation，也会被提炼成高优先级 section，再次注入后续轮次
+- 这样 `ReAct / Plan-and-Solve / Reflection` 三种范式都能共享同一套“记忆 + 检索 + 工具事实”的上下文拼装逻辑
+
 ## 当前的 embedding 进展
 
 现在项目里有两种 embedding 方案：
@@ -302,6 +308,17 @@ QDRANT_RAG_COLLECTION=rag_chunks_bge_m3
 
 这样可以避免不同 embedding 维度共用同一个 collection。
 
+如果你想调整上下文工程的裁剪和自动检索行为，也可以继续加上这些可选配置：
+
+```env
+CONTEXT_MAX_CHARS=3200
+CONTEXT_MAX_SECTIONS=6
+CONTEXT_SECTION_MAX_CHARS=1200
+AUTO_RAG_CONTEXT=true
+AUTO_RAG_CONTEXT_LIMIT=3
+TOOL_CONTEXT_OBSERVATION_LIMIT=4
+```
+
 如果你想启用真实 Neo4j，可以继续加上这些可选配置：
 
 ```env
@@ -355,6 +372,15 @@ main.configure_logging()
 main.run_demo("embedding_smoke")
 ```
 
+如果你想直接看 Agent 在发请求前会拼出什么上下文，可以执行：
+
+```python
+import main
+
+main.configure_logging()
+main.run_demo("context_smoke")
+```
+
 如果配置正确，终端会输出：
 
 - 最终答案
@@ -382,6 +408,13 @@ main.run_demo("embedding_smoke")
 - 当前向量维度
 - 相近文本相似度
 - 无关文本相似度
+
+在 `context_smoke` 演示里，会直接看到：
+
+- 运行规则 section
+- 当前轮已确认的工具观察
+- 召回到的历史记忆
+- 自动注入的 RAG 检索上下文
 
 如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
@@ -411,6 +444,7 @@ main.run_demo("embedding_smoke")
 - 工具系统目前比较轻量
 - 测试还不够系统化
 - 上下文工程目前还是轻量版，虽然已经有字符预算与去重，但还没有做真正的 token 预算
+- 自动 RAG 注入目前还是启发式触发，不是完整的 query planner
 - 文档会继续补充，目录结构也可能继续调整
 
 ## 接下来准备继续做的事情

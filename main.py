@@ -378,6 +378,50 @@ def test_embedding_smoke() -> None:
     print(f"无关文本相似度: {unrelated_score:.4f}")
 
 
+def test_context_engineering_smoke() -> None:
+    """
+    运行一个上下文工程冒烟测试。
+
+    修改说明：这个测试不依赖真实 LLM，只检查 Agent 在发请求前会拼出什么上下文，
+    便于验证“记忆 / 自动 RAG / 工具观察”是否真的合并进了同一个 context packet。
+    """
+    memory_manager = build_memory_manager()
+    session_id = "context_engineering_smoke"
+    memory_manager.clear_session(session_id)
+    memory_manager.record_message(
+        session_id=session_id,
+        role="user",
+        content="我喜欢美式咖啡，不喜欢过甜饮品。",
+    )
+
+    rag_pipeline = build_rag_pipeline(memory_manager)
+    rag_pipeline.add_document(str(ensure_demo_rag_document()))
+    registry = build_tool_registry(memory_manager, session_id, rag_pipeline)
+
+    agent = ReactAgent(
+        name="context_engineering_smoke",
+        llm=object(),  # type: ignore[arg-type]
+        tool_registry=registry,
+        config=Config.from_env(),
+        max_steps=1,
+        memory_manager=memory_manager,
+        session_id=session_id,
+    )
+    agent._start_new_run("helloAgent 当前支持哪些 Agent 范式？顺便告诉我饮品偏好。")
+    agent._remember_tool_observation("get_time", "当前本地时间为 2026-04-05 21:00:00。")
+
+    rendered = agent._build_context_packet().render(
+        max_chars=agent.config.context_max_chars,
+        max_sections=agent.config.context_max_sections,
+        section_max_chars=agent.config.context_section_max_chars,
+    )
+
+    print("\n" + "=" * 24)
+    print("上下文工程冒烟测试")
+    print("=" * 24)
+    print(rendered or "(没有生成上下文)")
+
+
 def run_demo(target: str = "reflection") -> None:
     """根据名称运行指定的示例，方便你在一个入口里切换不同 Agent。"""
     demos = {
@@ -388,6 +432,7 @@ def run_demo(target: str = "reflection") -> None:
         "rag": test_rag_workflow,
         "rag_smoke": test_rag_pipeline_smoke,
         "embedding_smoke": test_embedding_smoke,
+        "context_smoke": test_context_engineering_smoke,
     }
     if target not in demos:
         raise ValueError(f"不支持的测试目标: {target}，可选值: {', '.join(demos)}")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from agents.agent_base import Agent
 from core import Config, ContextBuilder, HelloAgentsLLM, Message
@@ -29,6 +29,8 @@ class ReasoningAgentBase(Agent):
         self.memory_manager = memory_manager
         self.session_id = session_id or name
         self.current_input: str = ""
+        self.tool_observations: List[Dict[str, str]] = []
+        self._rag_context_cache: Dict[str, str] = {}
 
     def _start_new_run(self, input_text: str) -> None:
         """
@@ -39,6 +41,8 @@ class ReasoningAgentBase(Agent):
         """
         self.current_history = []
         self.current_input = input_text
+        self.tool_observations = []
+        self._rag_context_cache = {}
         self.clear_history()
 
         if self.system_prompt:
@@ -101,7 +105,111 @@ class ReasoningAgentBase(Agent):
         memory_context = self._build_memory_context()
         if memory_context:
             builder.add_memory(memory_context)
+        tool_context = self._build_tool_observation_context()
+        if tool_context:
+            builder.add_notes(
+                "工具观察",
+                tool_context,
+                priority=85,
+                source="tool_observation",
+            )
+        rag_context = self._build_auto_rag_context()
+        if rag_context:
+            builder.add_retrieval(rag_context)
         return builder.build()
+
+    def _build_tool_observation_context(self) -> str:
+        """把当前运行过程中已经确认过的工具观察整理成高优先级上下文。"""
+        if not self.tool_observations:
+            return ""
+
+        recent_items = self.tool_observations[-self.config.tool_context_observation_limit :]
+        lines = ["以下内容来自本轮已经执行过的工具，请优先相信这些观察结果："]
+        for index, item in enumerate(recent_items, start=1):
+            lines.append(f"{index}. [{item['tool']}] {item['observation']}")
+        return "\n".join(lines)
+
+    def _build_auto_rag_context(self) -> str:
+        """
+        自动从 rag_tool 拉取与当前问题相关的检索上下文。
+
+        修改说明：这样模型在真正决定“要不要手动调用 rag_tool”之前，
+        就已经能先看到一层压缩后的检索结果；对问答类任务更稳，也更像实际项目里的预检索流程。
+        """
+        if not self.config.auto_rag_context:
+            return ""
+        query = self.current_input.strip()
+        if not query or not self._should_use_auto_rag(query):
+            return ""
+        if query in self._rag_context_cache:
+            return self._rag_context_cache[query]
+
+        rag_tool = self.tool_registry.get_tool("rag_tool")
+        if rag_tool is None or not hasattr(rag_tool, "rag_pipeline"):
+            return ""
+
+        try:
+            sources = rag_tool.rag_pipeline.list_sources()
+            if not sources:
+                self._rag_context_cache[query] = ""
+                return ""
+            matches = rag_tool.rag_pipeline.search(
+                query,
+                limit=self.config.auto_rag_context_limit,
+            )
+        except Exception:
+            matches = []
+
+        if not matches:
+            context = ""
+        else:
+            lines = ["以下内容来自自动 RAG 检索，请优先参考这些证据片段：", "参考结论："]
+            for index, item in enumerate(matches, start=1):
+                summary = " ".join(item.chunk.content.split())
+                if len(summary) > 120:
+                    summary = f"{summary[:120].rstrip()}..."
+                lines.append(f"{index}. {summary}")
+            lines.append("证据片段：")
+            for index, item in enumerate(matches, start=1):
+                lines.append(
+                    f"{index}. 来源: {item.chunk.source} | 综合分数: {item.score:.4f}\n{item.chunk.content}"
+                )
+            context = "\n".join(lines)
+        self._rag_context_cache[query] = context
+        return context
+
+    @staticmethod
+    def _should_use_auto_rag(query: str) -> bool:
+        """
+        粗略判断当前输入是否适合做自动检索。
+
+        修改说明：像“加索引 / 清空索引 / 列出来源”这类工具管理动作不适合自动做 RAG 召回，
+        否则只会给 prompt 里塞入无关上下文。
+        """
+        normalized = query.strip().lower()
+        skip_keywords = (
+            "加入索引",
+            "建立索引",
+            "添加文档",
+            "清空索引",
+            "列出来源",
+            "sources",
+            "action:add",
+            "action:clear",
+            "rag_tool add",
+            "rag_tool clear",
+        )
+        return not any(keyword in normalized for keyword in skip_keywords)
+
+    def _remember_tool_observation(self, tool_name: str, observation: str) -> None:
+        """记录本轮工具观察，供上下文工程优先注入。"""
+        cleaned = observation.strip()
+        if not cleaned:
+            return
+        self.tool_observations.append({"tool": tool_name, "observation": cleaned})
+        if tool_name == "rag_tool":
+            # 修改说明：rag_tool 会改变可检索上下文，执行后清掉缓存，保证下一轮拿到最新索引状态。
+            self._rag_context_cache = {}
 
     def _remember_message(self, message: Message, persist: Optional[bool] = None) -> None:
         """把消息放进运行态历史，并按配置决定是否写入长期记忆。"""
