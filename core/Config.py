@@ -82,6 +82,9 @@ class Config(BaseModel):
     auto_rag_context: bool = True
     auto_rag_context_limit: int = 3
     tool_context_observation_limit: int = 4
+    tool_max_retries: int = 1
+    tool_retry_backoff_ms: int = 0
+    tool_enable_graceful_degradation: bool = True
     enable_context_conflict_resolution: bool = True
 
     @classmethod
@@ -127,6 +130,18 @@ class Config(BaseModel):
             tool_context_observation_limit=_read_int(
                 defaults.tool_context_observation_limit,
                 "TOOL_CONTEXT_OBSERVATION_LIMIT",
+            ),
+            tool_max_retries=_read_int(
+                defaults.tool_max_retries,
+                "TOOL_MAX_RETRIES",
+            ),
+            tool_retry_backoff_ms=_read_int(
+                defaults.tool_retry_backoff_ms,
+                "TOOL_RETRY_BACKOFF_MS",
+            ),
+            tool_enable_graceful_degradation=_read_bool(
+                defaults.tool_enable_graceful_degradation,
+                "TOOL_ENABLE_GRACEFUL_DEGRADATION",
             ),
             enable_context_conflict_resolution=_read_bool(
                 defaults.enable_context_conflict_resolution,

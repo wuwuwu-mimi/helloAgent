@@ -792,9 +792,13 @@ class ReasoningAgentBase(Agent):
         parts: List[str] = []
         meta = item.get("meta")
         if isinstance(meta, dict):
-            for key in ("action", "count", "written", "cleared"):
+            for key in ("action", "count", "written", "cleared", "attempt", "max_attempts"):
                 if key in meta:
                     parts.append(f"{key}={meta[key]}")
+            if meta.get("recovered_after_retry"):
+                parts.append("recovered_after_retry=True")
+            if meta.get("degraded"):
+                parts.append("degraded=True")
         data_preview = str(item.get("data_preview", "") or "").strip()
         if data_preview:
             parts.append(f"data={self._preview(data_preview, limit=80)}")

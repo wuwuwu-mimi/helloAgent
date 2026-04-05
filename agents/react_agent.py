@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from core import Config, HelloAgentsLLM, Message
@@ -209,12 +210,26 @@ class ReactAgent(ReasoningAgentBase):
         try:
             parameters = self._prepare_tool_parameters(tool, action_input)
             logger.debug("工具 `%s` 解析后的参数: %r", action_type, parameters)
-            result = tool.execute(parameters)
+            result = self._execute_tool_with_recovery(tool, parameters)
             logger.info("工具 `%s` 执行结果: %s", action_type, self._preview(result.render_for_observation()))
             return self._handle_tool_result(action_type, result)
-        except Exception as exc:  # noqa: BLE001 - 工具错误应当回传给模型继续推理
-            logger.exception("tool %s execution failed", action_type)
-            return f"Tool '{action_type}' failed: {exc}"
+        except Exception as exc:  # noqa: BLE001 - 参数准备错误应当回传给模型继续推理
+            logger.exception("tool %s parameter preparation failed", action_type)
+            failure_result = ToolResult.fail(
+                str(exc),
+                meta={
+                    "tool": action_type,
+                    "retryable": False,
+                    "failure_stage": "parameter_prepare",
+                },
+            )
+            failure_result = self._finalize_failed_tool_result(
+                action_type,
+                failure_result,
+                attempt=1,
+                max_attempts=1,
+            )
+            return self._handle_tool_result(action_type, failure_result)
 
     def _handle_tool_result(self, tool_name: str, result: ToolResult) -> str:
         """
@@ -238,6 +253,174 @@ class ReactAgent(ReasoningAgentBase):
         if not self._native_tool_execution_in_progress:
             self._remember_tool_result_memory(tool_name, observation, result)
         return observation
+
+    def _execute_tool_with_recovery(self, tool: Tool, parameters: Dict[str, Any]) -> ToolResult:
+        """
+        执行工具，并在失败时按配置做最小可用的重试与降级。
+
+        修改说明：这一步把“失败恢复策略”收敛到一处，后面如果要接更复杂的
+        backoff / 熔断 / 降级路由，也只需要沿着这里继续扩展。
+        """
+        max_attempts = max(1, int(self.config.tool_max_retries or 0) + 1)
+        last_result: Optional[ToolResult] = None
+
+        for attempt in range(1, max_attempts + 1):
+            result = tool.execute(parameters)
+            result = self._annotate_tool_attempt_metadata(
+                result=result,
+                tool_name=tool.name,
+                attempt=attempt,
+                max_attempts=max_attempts,
+            )
+            last_result = result
+
+            if result.success:
+                if attempt > 1:
+                    logger.info("工具 `%s` 在第 %s 次尝试后恢复成功。", tool.name, attempt)
+                return result
+
+            if not self._should_retry_tool_result(result, attempt=attempt, max_attempts=max_attempts):
+                return self._finalize_failed_tool_result(
+                    tool.name,
+                    result,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                )
+
+            logger.warning(
+                "工具 `%s` 第 %s/%s 次执行失败，准备重试: %s",
+                tool.name,
+                attempt,
+                max_attempts,
+                self._preview(result.render_for_observation()),
+            )
+            self._sleep_before_tool_retry()
+
+        assert last_result is not None  # 理论上不会为空，这里只是给类型系统一个兜底。
+        return self._finalize_failed_tool_result(
+            tool.name,
+            last_result,
+            attempt=max_attempts,
+            max_attempts=max_attempts,
+        )
+
+    def _annotate_tool_attempt_metadata(
+        self,
+        *,
+        result: ToolResult,
+        tool_name: str,
+        attempt: int,
+        max_attempts: int,
+    ) -> ToolResult:
+        """给工具结果补充当前重试轮次信息。"""
+        metadata = dict(result.meta)
+        metadata.update(
+            {
+                "tool": tool_name,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "recovered_after_retry": result.success and attempt > 1,
+            }
+        )
+        return result.model_copy(update={"meta": metadata})
+
+    def _should_retry_tool_result(
+        self,
+        result: ToolResult,
+        *,
+        attempt: int,
+        max_attempts: int,
+    ) -> bool:
+        """根据 ToolResult 判断当前失败是否值得自动重试。"""
+        if result.success or attempt >= max_attempts:
+            return False
+
+        explicit_retryable = result.meta.get("retryable")
+        if isinstance(explicit_retryable, bool):
+            return explicit_retryable
+
+        combined = " ".join(
+            part for part in [result.error.strip(), result.content.strip()] if part
+        ).lower()
+        transient_keywords = (
+            "timeout",
+            "timed out",
+            "tempor",
+            "connection",
+            "unavailable",
+            "rate limit",
+            "429",
+            "busy",
+            "reset",
+            "refused",
+            "稍后重试",
+            "超时",
+            "连接",
+        )
+        return any(keyword in combined for keyword in transient_keywords)
+
+    def _finalize_failed_tool_result(
+        self,
+        tool_name: str,
+        result: ToolResult,
+        *,
+        attempt: int,
+        max_attempts: int,
+    ) -> ToolResult:
+        """在最终失败时补一层降级提示，避免模型收到过于生硬的错误。"""
+        metadata = dict(result.meta)
+        metadata.update(
+            {
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "recovery_exhausted": True,
+            }
+        )
+        if not self.config.tool_enable_graceful_degradation:
+            return result.model_copy(update={"meta": metadata})
+
+        guidance = self._build_tool_degradation_guidance(
+            tool_name=tool_name,
+            result=result,
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+        content = result.content.strip()
+        if guidance and guidance not in content:
+            content = f"{content}\n{guidance}".strip() if content else guidance
+        metadata["degraded"] = True
+        return result.model_copy(update={"content": content, "meta": metadata})
+
+    def _build_tool_degradation_guidance(
+        self,
+        *,
+        tool_name: str,
+        result: ToolResult,
+        attempt: int,
+        max_attempts: int,
+    ) -> str:
+        """根据失败类型生成一条适合回填给模型的降级提示。"""
+        stage = str(result.meta.get("failure_stage", "") or "").strip().lower()
+        if stage == "parameter_prepare":
+            return "降级提示：请检查工具参数格式，必要时改用 JSON 对象重新调用。"
+
+        if max_attempts > 1:
+            return (
+                f"降级提示：工具 `{tool_name}` 已自动重试 {attempt} 次仍失败。"
+                "如果问题不是强依赖外部工具，请基于现有上下文说明不确定性，不要伪造工具结果。"
+            )
+
+        return (
+            f"降级提示：工具 `{tool_name}` 当前不可用。"
+            "如果无法再次获取外部信息，请明确说明失败原因。"
+        )
+
+    def _sleep_before_tool_retry(self) -> None:
+        """按配置在工具重试前等待一小段时间。"""
+        backoff_ms = int(self.config.tool_retry_backoff_ms or 0)
+        if backoff_ms <= 0:
+            return
+        time.sleep(backoff_ms / 1000)
 
     def _prepare_tool_parameters(self, tool: Tool, action_input: Optional[str]) -> Dict[str, Any]:
         """

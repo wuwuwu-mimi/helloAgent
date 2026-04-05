@@ -575,6 +575,13 @@ main.run_demo("native_reflection_smoke")
 - ToolResult 里的 `meta / data` 已开始接入日志、工具观察和工具记忆
 - 非法枚举值时的本地校验错误提示
 
+在 `tool_recovery_smoke` 演示里，会直接看到：
+
+- 可重试失败在 Agent 层被自动重试
+- 重试成功后的恢复结果
+- 重试耗尽后的降级提示
+- 工具上下文里如何保留 `attempt / max_attempts / degraded`
+
 在 `native_tool_smoke` 演示里，会直接看到：
 
 - 模型返回的 `tool_calls`
@@ -623,7 +630,8 @@ main.run_demo("native_reflection_smoke")
 - schema 和原生 tool calling 还没有完全接上
 - 工具 schema 当前已经有第一版本地校验骨架，但还没有补到复杂嵌套结构和更细的约束
 - 工具执行结果当前已经有第一版 `ToolResult` 协议，并已开始接入日志与工具记忆
-- 但还没有把失败恢复、重试、统计等能力全部围绕它重构完
+- 失败恢复、自动重试和基础降级提示已经有第一版实现
+- 但还没有把熔断、统计、策略化重试等能力全部围绕它重构完
 - 原生 tool calling 已覆盖 `ReactAgent / Plan-and-Solve / Reflection`，并抽成了公共执行层
 - 但 schema 校验、并行工具调用、失败恢复策略还没有补完整
 - 工具系统目前比较轻量

@@ -186,6 +186,71 @@ class SchemaSmokeTool(Tool):
         ]
 
 
+class FlakyRecoveryTool(Tool):
+    """
+    用于验证 Agent 自动重试能力的演示工具。
+
+    修改说明：第一次调用故意返回可重试失败，第二次再成功，
+    这样可以稳定观察“失败恢复”是否真的在 Agent 层生效。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="flaky_recovery_tool",
+            description="第一次失败、第二次成功的测试工具。",
+        )
+        self.calls = 0
+
+    def run(self, parameters: dict[str, object]) -> ToolResult:
+        del parameters
+        self.calls += 1
+        if self.calls == 1:
+            return ToolResult.fail(
+                "模拟临时超时，请稍后重试。",
+                meta={
+                    "tool": self.name,
+                    "retryable": True,
+                    "failure_stage": "remote_call",
+                },
+            )
+        return ToolResult.ok(
+            "工具在重试后恢复成功。",
+            data={"calls": self.calls},
+            meta={"tool": self.name, "action": "recover"},
+        )
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return []
+
+
+class AlwaysFailTool(Tool):
+    """
+    用于验证降级提示的演示工具。
+
+    修改说明：这个工具始终失败，便于观察重试耗尽后 Agent 是否会补充降级说明。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="always_fail_tool",
+            description="始终失败的测试工具。",
+        )
+
+    def run(self, parameters: dict[str, object]) -> ToolResult:
+        del parameters
+        return ToolResult.fail(
+            "模拟服务当前不可用。",
+            meta={
+                "tool": self.name,
+                "retryable": True,
+                "failure_stage": "service_unavailable",
+            },
+        )
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return []
+
+
 def configure_logging() -> None:
     """
     配置更干净的控制台日志。
@@ -866,6 +931,50 @@ def test_tool_schema_smoke() -> None:
         print("未触发预期错误，请检查 schema 校验逻辑。")
 
 
+def test_tool_recovery_smoke() -> None:
+    """
+    运行一个工具失败恢复冒烟测试。
+
+    修改说明：这里重点验证两条链路：
+    1. 可重试失败是否会被 Agent 自动重试
+    2. 重试耗尽后是否会补充降级提示，而不是只返回生硬报错
+    """
+    config = Config.from_env().model_copy(
+        update={
+            "tool_calling_mode": "text",
+            "tool_max_retries": 1,
+            "tool_enable_graceful_degradation": True,
+        }
+    )
+    registry = ToolRegistry()
+    registry.register_tool(FlakyRecoveryTool())
+    registry.register_tool(AlwaysFailTool())
+
+    agent = ReactAgent(
+        name="tool_recovery_smoke",
+        llm=NativeToolCallingSmokeLLM(),  # type: ignore[arg-type]
+        tool_registry=registry,
+        config=config,
+        max_steps=1,
+    )
+    agent._start_new_run("测试工具失败恢复链路。")
+
+    agent.current_history.append("Action: flaky_recovery_tool[]")
+    recovered = agent._handle_action("flaky_recovery_tool", "")
+    agent._append_observation(recovered)
+
+    agent.current_history.append("Action: always_fail_tool[]")
+    degraded = agent._handle_action("always_fail_tool", "")
+    agent._append_observation(degraded)
+
+    summary = (
+        f"恢复成功示例：{recovered}\n"
+        f"降级结果示例：{degraded}\n"
+        f"工具上下文：\n{agent._build_tool_observation_context()}"
+    )
+    print_run_summary("Tool Recovery 测试", summary, agent.current_history)
+
+
 def run_demo(target: str = "reflection") -> None:
     """根据名称运行指定的示例，方便你在一个入口里切换不同 Agent。"""
     demos = {
@@ -881,6 +990,7 @@ def run_demo(target: str = "reflection") -> None:
         "conflict_smoke": test_context_conflict_smoke,
         "summary_smoke": test_summary_smoke,
         "tool_schema_smoke": test_tool_schema_smoke,
+        "tool_recovery_smoke": test_tool_recovery_smoke,
         "native_tool_smoke": test_native_tool_calling_smoke,
         "native_plan_smoke": test_native_plan_smoke,
         "native_reflection_smoke": test_native_reflection_smoke,

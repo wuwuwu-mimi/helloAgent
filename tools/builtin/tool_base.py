@@ -96,7 +96,12 @@ class Tool(ABC):
         修改说明：保留各工具的 `run()` 简单接口，但真正给 Agent 使用时统一走 `execute()`，
         这样老工具不用一次性全部重写，新老返回格式也能平滑兼容。
         """
-        return self._coerce_result(self.run(parameters))
+        try:
+            return self._coerce_result(self.run(parameters))
+        except ToolValidationError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 工具异常统一折叠到 ToolResult
+            return self._build_exception_result(exc)
 
     def get_parameters_schema(self) -> Dict[str, Any]:
         """
@@ -313,3 +318,24 @@ class Tool(ABC):
             )
 
         return ToolResult.ok(str(result), data=result)
+
+    def _build_exception_result(self, exc: Exception) -> ToolResult:
+        """
+        把工具异常包装成失败结果。
+
+        修改说明：这样 Agent 在做重试 / 降级时，不需要同时兼容“异常”和“失败结果”两套分支。
+        """
+        return ToolResult.fail(
+            f"{type(exc).__name__}: {exc}",
+            meta={
+                "tool": self.name,
+                "retryable": self._is_retryable_exception(exc),
+                "exception_type": type(exc).__name__,
+                "failure_stage": "tool_execute",
+            },
+        )
+
+    @staticmethod
+    def _is_retryable_exception(exc: Exception) -> bool:
+        """粗略判断一个工具异常是否适合自动重试。"""
+        return isinstance(exc, (TimeoutError, ConnectionError, OSError))
