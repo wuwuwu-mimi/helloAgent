@@ -81,6 +81,7 @@ class Config(BaseModel):
     auto_rag_context: bool = True
     auto_rag_context_limit: int = 3
     tool_context_observation_limit: int = 4
+    enable_context_conflict_resolution: bool = True
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -124,6 +125,10 @@ class Config(BaseModel):
             tool_context_observation_limit=_read_int(
                 defaults.tool_context_observation_limit,
                 "TOOL_CONTEXT_OBSERVATION_LIMIT",
+            ),
+            enable_context_conflict_resolution=_read_bool(
+                defaults.enable_context_conflict_resolution,
+                "ENABLE_CONTEXT_CONFLICT_RESOLUTION",
             ),
         )
 

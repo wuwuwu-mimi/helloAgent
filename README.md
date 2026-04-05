@@ -174,6 +174,15 @@ Action: get_time[]
 - 证据片段
 - 与当前问题直接相关的少量记忆
 
+同时，这一层现在也开始做“冲突消解提示”：
+
+- 如果记忆、RAG、工具观察之间出现明显冲突，系统会额外生成一个 `冲突消解` section
+- 当前默认规则是：
+  - 工具观察优先于一切
+  - 用户偏好冲突时，记忆优先
+  - 项目 / 文档事实冲突时，RAG 证据优先
+- 这一步的目标不是自动裁决真相，而是防止模型把相反说法强行揉成一个新事实
+
 ## 当前的 embedding 进展
 
 现在项目里有两种 embedding 方案：
@@ -342,6 +351,7 @@ AUTO_MEMORY_CONTEXT_LIMIT=5
 AUTO_RAG_CONTEXT=true
 AUTO_RAG_CONTEXT_LIMIT=3
 TOOL_CONTEXT_OBSERVATION_LIMIT=4
+ENABLE_CONTEXT_CONFLICT_RESOLUTION=true
 ```
 
 如果你想启用真实 Neo4j，可以继续加上这些可选配置：
@@ -415,6 +425,15 @@ main.configure_logging()
 main.run_demo("routing_smoke")
 ```
 
+如果你想看“记忆和文档互相矛盾时，系统怎么提示冲突与优先规则”，可以执行：
+
+```python
+import main
+
+main.configure_logging()
+main.run_demo("conflict_smoke")
+```
+
 如果配置正确，终端会输出：
 
 - 最终答案
@@ -456,6 +475,13 @@ main.run_demo("routing_smoke")
 - memory / rag / tool 三类上下文的优先级
 - 同一个 Agent 在“偏回忆问题”和“偏文档问题”下的不同拼装结果
 
+在 `conflict_smoke` 演示里，会直接看到：
+
+- 当前命中的上下文路由
+- `冲突消解` section
+- 哪些说法被判定为潜在冲突
+- 当前应该优先采用哪一侧来源
+
 如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
 ## 当前支持的 Provider 方向
@@ -486,6 +512,7 @@ main.run_demo("routing_smoke")
 - 上下文工程目前还是轻量版，虽然已经有字符预算与去重，但还没有做真正的 token 预算
 - 自动 RAG 注入目前还是启发式触发，不是完整的 query planner
 - memory / rag / tool 的上下文路由目前也是启发式规则，不是训练得到的策略模型
+- 冲突检测目前主要覆盖“用户偏好 / 支持关系 / 包含关系”等常见模式，还不是通用事实校验器
 - 文档会继续补充，目录结构也可能继续调整
 
 ## 接下来准备继续做的事情

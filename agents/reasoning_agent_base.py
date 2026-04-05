@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from agents.agent_base import Agent
@@ -10,6 +11,20 @@ from tools.builtin.toolRegistry import ToolRegistry
 
 class ReasoningAgentBase(Agent):
     """带有统一消息构建、LLM 调用和运行期历史管理能力的公共父类。"""
+
+    _PREFERENCE_PATTERN = re.compile(
+        r"(?:用户|我|这个用户)?(?P<neg>不|别|别再|并不|不是很)?(?P<verb>喜欢|爱喝|偏好|讨厌)"
+        r"(?P<object>[\u4e00-\u9fffA-Za-z0-9\-]{2,20})"
+    )
+    _SUPPORT_PATTERN = re.compile(
+        r"(?P<subject>helloagent|项目|系统|记忆系统)?(?:当前|目前)?(?P<neg>不)?支持"
+        r"(?P<object>[\u4e00-\u9fffA-Za-z0-9\-]{2,30})",
+        re.IGNORECASE,
+    )
+    _CONTAINS_PATTERN = re.compile(
+        r"(?P<subject>记忆系统|系统|项目)?(?:已经)?(?P<neg>不)?包含"
+        r"(?P<object>[\u4e00-\u9fffA-Za-z0-9\-]{2,30})"
+    )
 
     def __init__(
         self,
@@ -31,6 +46,7 @@ class ReasoningAgentBase(Agent):
         self.current_input: str = ""
         self.tool_observations: List[Dict[str, str]] = []
         self._rag_context_cache: Dict[str, str] = {}
+        self._rag_evidence_cache: Dict[str, List[Dict[str, str]]] = {}
 
     def _start_new_run(self, input_text: str) -> None:
         """
@@ -43,6 +59,7 @@ class ReasoningAgentBase(Agent):
         self.current_input = input_text
         self.tool_observations = []
         self._rag_context_cache = {}
+        self._rag_evidence_cache = {}
         self.clear_history()
 
         if self.system_prompt:
@@ -112,7 +129,8 @@ class ReasoningAgentBase(Agent):
                 "如果历史记忆或检索上下文不足以支持结论，应明确说明不确定性。",
             ]
         )
-        for section in self._build_auto_memory_sections(route):
+        memory_sections = self._build_auto_memory_sections(route)
+        for section in memory_sections:
             builder.add_notes(
                 section["title"],
                 section["content"],
@@ -134,6 +152,14 @@ class ReasoningAgentBase(Agent):
                 rag_context,
                 priority=route["rag_priority"],
                 source="retrieval",
+            )
+        conflict_note = self._build_conflict_resolution_note(route=route, memory_sections=memory_sections)
+        if conflict_note:
+            builder.add_notes(
+                "冲突消解",
+                conflict_note,
+                priority=94,
+                source="conflict_resolution",
             )
         return builder.build()
 
@@ -226,6 +252,14 @@ class ReasoningAgentBase(Agent):
         if not matches:
             context = ""
         else:
+            self._rag_evidence_cache[query] = [
+                {
+                    "source": item.chunk.source,
+                    "content": item.chunk.content,
+                    "score": f"{item.score:.4f}",
+                }
+                for item in matches
+            ]
             lines = ["以下内容来自自动 RAG 检索，请优先参考这些证据片段：", "参考结论："]
             for index, item in enumerate(matches, start=1):
                 summary = " ".join(item.chunk.content.split())
@@ -238,6 +272,8 @@ class ReasoningAgentBase(Agent):
                     f"{index}. 来源: {item.chunk.source} | 综合分数: {item.score:.4f}\n{item.chunk.content}"
                 )
             context = "\n".join(lines)
+        if not matches:
+            self._rag_evidence_cache[query] = []
         self._rag_context_cache[query] = context
         return context
 
@@ -367,6 +403,226 @@ class ReasoningAgentBase(Agent):
         if tool_name == "rag_tool":
             # 修改说明：rag_tool 会改变可检索上下文，执行后清掉缓存，保证下一轮拿到最新索引状态。
             self._rag_context_cache = {}
+            self._rag_evidence_cache = {}
+
+    def _build_conflict_resolution_note(
+        self,
+        *,
+        route: Dict[str, int | str | bool],
+        memory_sections: List[Dict[str, int | str]],
+    ) -> str:
+        """
+        检查 memory / rag / tool observation 之间是否存在明显冲突，并给出消解规则。
+
+        修改说明：这一步不是做“真相判断器”，而是给模型一个清晰的取舍框架，
+        避免它在上下文出现相反说法时自己随意拼接出自相矛盾的回答。
+        """
+        if not self.config.enable_context_conflict_resolution:
+            return ""
+
+        policy_lines = [
+            "当不同上下文来源出现冲突时，请按下面规则处理：",
+            "1. 工具观察始终优先于自动记忆和自动 RAG。",
+            "2. 如果是“用户偏好 / 个性化信息”冲突，优先采用记忆。",
+            "3. 如果是“项目事实 / 文档事实”冲突，优先采用 RAG 证据。",
+            "4. 如果仍然无法判断，请明确说明存在冲突，不要擅自融合成一个新事实。",
+        ]
+
+        claims: List[Dict[str, str]] = []
+        claims.extend(self._extract_claims_from_memory_sections(memory_sections))
+        claims.extend(self._extract_claims_from_tool_observations())
+        claims.extend(self._extract_claims_from_rag_evidence())
+        conflicts = self._detect_conflicts(claims)
+
+        if not conflicts:
+            return "\n".join(policy_lines)
+
+        lines = policy_lines + ["", "当前检测到的潜在冲突："]
+        for index, conflict in enumerate(conflicts, start=1):
+            winner = self._resolve_conflict_winner(conflict["category"], conflict["claims"], route)
+            lines.append(
+                f"{index}. 主题: {conflict['topic']} | 类型: {conflict['category']} | 当前优先采用: {winner['source_label']}"
+            )
+            lines.append(f"   原因: {winner['reason']}")
+            for claim in conflict["claims"]:
+                lines.append(
+                    f"   - 来源={claim['source_label']} | 说法={claim['text']}"
+                )
+        return "\n".join(lines)
+
+    def _extract_claims_from_memory_sections(
+        self,
+        memory_sections: List[Dict[str, int | str]],
+    ) -> List[Dict[str, str]]:
+        claims: List[Dict[str, str]] = []
+        for section in memory_sections:
+            title = str(section["title"])
+            lines = str(section["content"]).splitlines()
+            for line in lines:
+                cleaned = line.lstrip("- ").strip()
+                if not cleaned:
+                    continue
+                claims.extend(
+                    self._extract_claims_from_text(
+                        cleaned,
+                        source="memory",
+                        source_label=f"记忆/{title}",
+                    )
+                )
+        return claims
+
+    def _extract_claims_from_tool_observations(self) -> List[Dict[str, str]]:
+        claims: List[Dict[str, str]] = []
+        for item in self.tool_observations:
+            claims.extend(
+                self._extract_claims_from_text(
+                    item["observation"],
+                    source="tool",
+                    source_label=f"工具/{item['tool']}",
+                )
+            )
+        return claims
+
+    def _extract_claims_from_rag_evidence(self) -> List[Dict[str, str]]:
+        claims: List[Dict[str, str]] = []
+        for item in self._rag_evidence_cache.get(self.current_input.strip(), []):
+            claims.extend(
+                self._extract_claims_from_text(
+                    item["content"],
+                    source="rag",
+                    source_label=f"RAG/{item['source']}",
+                )
+            )
+        return claims
+
+    def _extract_claims_from_text(
+        self,
+        text: str,
+        *,
+        source: str,
+        source_label: str,
+    ) -> List[Dict[str, str]]:
+        claims: List[Dict[str, str]] = []
+        compact = " ".join(text.split())
+
+        for match in self._PREFERENCE_PATTERN.finditer(compact):
+            obj = self._normalize_claim_object(match.group("object"))
+            polarity = "negative" if self._is_negative_preference(match.group("neg"), match.group("verb")) else "positive"
+            claims.append(
+                {
+                    "topic": f"preference:{obj}",
+                    "category": "用户偏好",
+                    "polarity": polarity,
+                    "source": source,
+                    "source_label": source_label,
+                    "text": compact,
+                }
+            )
+
+        for match in self._SUPPORT_PATTERN.finditer(compact):
+            obj = self._normalize_claim_object(match.group("object"))
+            polarity = "negative" if match.group("neg") else "positive"
+            claims.append(
+                {
+                    "topic": f"support:{obj}",
+                    "category": "项目事实",
+                    "polarity": polarity,
+                    "source": source,
+                    "source_label": source_label,
+                    "text": compact,
+                }
+            )
+
+        for match in self._CONTAINS_PATTERN.finditer(compact):
+            obj = self._normalize_claim_object(match.group("object"))
+            polarity = "negative" if match.group("neg") else "positive"
+            claims.append(
+                {
+                    "topic": f"contains:{obj}",
+                    "category": "项目事实",
+                    "polarity": polarity,
+                    "source": source,
+                    "source_label": source_label,
+                    "text": compact,
+                }
+            )
+
+        return claims
+
+    @staticmethod
+    def _normalize_claim_object(value: str) -> str:
+        return value.strip().lower()
+
+    @staticmethod
+    def _is_negative_preference(negation: str | None, verb: str | None) -> bool:
+        if verb == "讨厌":
+            return True
+        return bool(negation)
+
+    @staticmethod
+    def _detect_conflicts(claims: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        grouped: Dict[str, List[Dict[str, str]]] = {}
+        for claim in claims:
+            grouped.setdefault(claim["topic"], []).append(claim)
+
+        conflicts: List[Dict[str, Any]] = []
+        for topic, items in grouped.items():
+            polarities = {item["polarity"] for item in items}
+            sources = {item["source"] for item in items}
+            if len(polarities) < 2 or len(sources) < 2:
+                continue
+            conflicts.append(
+                {
+                    "topic": topic,
+                    "category": items[0]["category"],
+                    "claims": items,
+                }
+            )
+        return conflicts
+
+    @staticmethod
+    def _resolve_conflict_winner(
+        category: str,
+        claims: List[Dict[str, str]],
+        route: Dict[str, int | str | bool],
+    ) -> Dict[str, str]:
+        tool_claim = next((item for item in claims if item["source"] == "tool"), None)
+        if tool_claim is not None:
+            return {
+                "source_label": tool_claim["source_label"],
+                "reason": "工具调用得到的 observation 是当前最直接的事实来源。",
+            }
+
+        if category == "用户偏好":
+            memory_claim = next((item for item in claims if item["source"] == "memory"), None)
+            if memory_claim is not None:
+                return {
+                    "source_label": memory_claim["source_label"],
+                    "reason": "这类信息属于个性化记忆，默认优先采用记忆中的历史偏好。",
+                }
+
+        if category == "项目事实":
+            rag_claim = next((item for item in claims if item["source"] == "rag"), None)
+            if rag_claim is not None:
+                return {
+                    "source_label": rag_claim["source_label"],
+                    "reason": "这类信息更接近文档事实，默认优先采用 RAG 检索到的证据。",
+                }
+
+        preferred_source = "memory" if bool(route.get("prefer_memory")) else "rag"
+        preferred_claim = next((item for item in claims if item["source"] == preferred_source), None)
+        if preferred_claim is not None:
+            route_name = str(route.get("route_name", "balanced"))
+            return {
+                "source_label": preferred_claim["source_label"],
+                "reason": f"当前问题命中 `{route_name}` 路由，因此优先采用该来源。",
+            }
+
+        fallback_claim = claims[0]
+        return {
+            "source_label": fallback_claim["source_label"],
+            "reason": "未找到更高优先级来源，暂时保留首个来源并提示不确定性。",
+        }
 
     def _remember_message(self, message: Message, persist: Optional[bool] = None) -> None:
         """把消息放进运行态历史，并按配置决定是否写入长期记忆。"""
