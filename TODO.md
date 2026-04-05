@@ -15,6 +15,7 @@
 - [ ] 统一工具执行结果协议
   - [x] 引入第一版 `ToolResult(success/content/data/error/meta)` 统一结果对象
   - [ ] 让更多工具显式返回结构化结果，而不是只返回字符串
+  - [x] 把 `ToolResult.meta / data` 接到日志、工具观察和工具记忆
   - 减少 Agent 直接依赖“工具只返回字符串”的隐式约定
   - 为日志、记忆写入、失败恢复打基础
 

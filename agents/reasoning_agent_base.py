@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 from agents.agent_base import Agent
 from core import ChatResult, Config, ContextBuilder, HelloAgentsLLM, Message, ToolCall, ToolFunction
 from memory.manager import MemoryManager
+from tools.builtin.tool_base import ToolResult
 from tools.builtin.toolRegistry import ToolRegistry
 
 
@@ -44,10 +45,12 @@ class ReasoningAgentBase(Agent):
         self.memory_manager = memory_manager
         self.session_id = session_id or name
         self.current_input: str = ""
-        self.tool_observations: List[Dict[str, str]] = []
+        self.tool_observations: List[Dict[str, Any]] = []
         self._rag_context_cache: Dict[str, str] = {}
         self._rag_evidence_cache: Dict[str, List[Dict[str, str]]] = {}
         self.enable_native_tool_calling = False
+        self._native_tool_execution_in_progress = False
+        self._last_tool_result_snapshot: Optional[Dict[str, Any]] = None
 
     def _start_new_run(self, input_text: str) -> None:
         """
@@ -261,7 +264,7 @@ class ReasoningAgentBase(Agent):
         append_current_history: bool = True,
         action_label: str = "Action",
         observation_label: str = "Observation",
-    ) -> str:
+    ) -> Dict[str, Any]:
         """执行一条原生 tool call，并把结果整理成标准 Observation。"""
         function = tool_call.get("function", {}) or {}
         tool_name = str(function.get("name", "")).strip()
@@ -271,13 +274,18 @@ class ReasoningAgentBase(Agent):
             history_target=history_target,
             append_current_history=append_current_history,
         )
-        observation = self._handle_action(tool_name, arguments)
+        self._native_tool_execution_in_progress = True
+        try:
+            observation = self._handle_action(tool_name, arguments)
+        finally:
+            self._native_tool_execution_in_progress = False
+        snapshot = self._consume_tool_result_snapshot(tool_name, observation)
         self._append_history_entry(
             f"{observation_label}: {observation}",
             history_target=history_target,
             append_current_history=append_current_history,
         )
-        return observation
+        return snapshot
 
     def _run_native_tool_calling_loop(
         self,
@@ -326,20 +334,24 @@ class ReasoningAgentBase(Agent):
 
             if result.tool_calls:
                 for tool_call in result.tool_calls:
-                    observation = self._execute_native_tool_call(
+                    execution_record = self._execute_native_tool_call(
                         tool_call,
                         history_target=history_target,
                         append_current_history=append_current_history,
                         action_label=action_label,
                         observation_label=observation_label,
                     )
+                    observation = str(execution_record.get("observation", "") or "")
                     if on_tool_observation is not None:
                         on_tool_observation(observation, tool_call, round_index)
+                    tool_message_metadata = dict(execution_record.get("message_metadata", {}) or {})
+                    if tool_metadata_factory:
+                        tool_message_metadata.update(tool_metadata_factory(round_index, tool_call))
                     tool_message = self._build_native_tool_message(
                         observation,
                         tool_call_id=tool_call.get("id") or f"tool_call_{round_index}",
                         tool_name=tool_call.get("function", {}).get("name"),
-                        metadata=tool_metadata_factory(round_index, tool_call) if tool_metadata_factory else None,
+                        metadata=tool_message_metadata or None,
                     )
                     messages.append(tool_message)
                     if on_tool_message is not None:
@@ -499,7 +511,8 @@ class ReasoningAgentBase(Agent):
         recent_items = self.tool_observations[-self.config.tool_context_observation_limit :]
         lines = ["以下内容来自本轮已经执行过的工具，请优先相信这些观察结果："]
         for index, item in enumerate(recent_items, start=1):
-            lines.append(f"{index}. [{item['tool']}] {item['observation']}")
+            suffix = self._summarize_tool_observation_metadata(item)
+            lines.append(f"{index}. [{item['tool']}] {item['observation']}{suffix}")
         return "\n".join(lines)
 
     def _build_auto_rag_context(self, route: Dict[str, int | str | bool]) -> str:
@@ -678,16 +691,116 @@ class ReasoningAgentBase(Agent):
             "prefer_rag": True,
         }
 
-    def _remember_tool_observation(self, tool_name: str, observation: str) -> None:
+    def _remember_tool_observation(
+        self,
+        tool_name: str,
+        observation: str,
+        *,
+        result: Optional[ToolResult] = None,
+    ) -> None:
         """记录本轮工具观察，供上下文工程优先注入。"""
         cleaned = observation.strip()
         if not cleaned:
             return
-        self.tool_observations.append({"tool": tool_name, "observation": cleaned})
+        payload: Dict[str, Any] = {
+            "tool": tool_name,
+            "observation": cleaned,
+        }
+        if result is not None:
+            payload.update(
+                {
+                    "success": result.success,
+                    "meta": dict(result.meta),
+                    "data_preview": self._preview(self._stringify_tool_payload(result.data), limit=160),
+                }
+            )
+        self.tool_observations.append(payload)
         if tool_name == "rag_tool":
             # 修改说明：rag_tool 会改变可检索上下文，执行后清掉缓存，保证下一轮拿到最新索引状态。
             self._rag_context_cache = {}
             self._rag_evidence_cache = {}
+
+    def _remember_tool_result_memory(self, tool_name: str, observation: str, result: ToolResult) -> None:
+        """把工具结果按统一协议写入记忆系统，便于后续检索和排查。"""
+        if self.memory_manager is None or not observation.strip():
+            return
+        self.memory_manager.record_message(
+            session_id=self.session_id,
+            role="tool",
+            content=observation,
+            metadata=self._build_tool_result_memory_metadata(tool_name, result, observation),
+            persist=self._should_persist_role("tool"),
+        )
+
+    def _build_tool_result_memory_metadata(
+        self,
+        tool_name: str,
+        result: ToolResult,
+        observation: str,
+    ) -> Dict[str, Any]:
+        """把 ToolResult 压缩成适合写进 metadata 的结构。"""
+        return {
+            "source": "tool_result",
+            "tool_name": tool_name,
+            "tool_success": result.success,
+            "tool_result_meta": dict(result.meta),
+            "tool_result_data_preview": self._preview(self._stringify_tool_payload(result.data), limit=240),
+            "tool_error": result.error,
+            "tool_observation": observation,
+        }
+
+    def _stash_tool_result_snapshot(self, tool_name: str, observation: str, result: ToolResult) -> None:
+        """缓存最近一次工具执行的结构化快照，供 native tool message 回填。"""
+        self._last_tool_result_snapshot = {
+            "tool_name": tool_name,
+            "observation": observation,
+            "result": result,
+            "message_metadata": self._build_tool_result_memory_metadata(tool_name, result, observation),
+        }
+
+    def _consume_tool_result_snapshot(
+        self,
+        tool_name: str,
+        observation: str,
+    ) -> Dict[str, Any]:
+        """取出最近一次工具结果快照；如果没有，就返回最小回退结构。"""
+        snapshot = self._last_tool_result_snapshot
+        self._last_tool_result_snapshot = None
+        if snapshot is None:
+            return {
+                "tool_name": tool_name,
+                "observation": observation,
+                "message_metadata": {
+                    "source": "tool_result",
+                    "tool_name": tool_name,
+                    "tool_observation": observation,
+                },
+            }
+        return snapshot
+
+    @staticmethod
+    def _stringify_tool_payload(payload: Any) -> str:
+        """把 tool data / meta 之类的结构化内容压成可读短文本。"""
+        if payload is None:
+            return ""
+        if isinstance(payload, str):
+            return payload
+        return repr(payload)
+
+    def _summarize_tool_observation_metadata(self, item: Dict[str, Any]) -> str:
+        """把工具结果里的 meta/data 摘成一小段附加说明，避免上下文过长。"""
+        parts: List[str] = []
+        meta = item.get("meta")
+        if isinstance(meta, dict):
+            for key in ("action", "count", "written", "cleared"):
+                if key in meta:
+                    parts.append(f"{key}={meta[key]}")
+        data_preview = str(item.get("data_preview", "") or "").strip()
+        if data_preview:
+            parts.append(f"data={self._preview(data_preview, limit=80)}")
+        if not parts:
+            return ""
+        return f" | {'; '.join(parts)}"
 
     def _build_conflict_resolution_note(
         self,

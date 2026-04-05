@@ -223,11 +223,21 @@ class ReactAgent(ReasoningAgentBase):
         修改说明：Agent 不再假设工具只会返回字符串，而是统一围绕 `ToolResult`
         做 Observation 渲染、错误拼装和成功结果记忆。
         """
-        observation = result.render_for_observation()
+        base_observation = result.render_for_observation()
+        observation = base_observation if result.success else f"Tool '{tool_name}' failed: {base_observation}"
+        logger.debug(
+            "工具 `%s` 结构化结果 | success=%s | meta=%s | data=%s",
+            tool_name,
+            result.success,
+            result.meta,
+            self._preview(self._stringify_tool_payload(result.data), limit=200),
+        )
+        self._stash_tool_result_snapshot(tool_name, observation, result)
         if result.success:
-            self._remember_tool_observation(tool_name, observation)
-            return observation
-        return f"Tool '{tool_name}' failed: {observation}"
+            self._remember_tool_observation(tool_name, observation, result=result)
+        if not self._native_tool_execution_in_progress:
+            self._remember_tool_result_memory(tool_name, observation, result)
+        return observation
 
     def _prepare_tool_parameters(self, tool: Tool, action_input: Optional[str]) -> Dict[str, Any]:
         """
