@@ -60,6 +60,21 @@ class SemanticMemory(BaseMemory):
         )
         return list(reversed(self._merge_items(vector_items + graph_items, limit)))
 
+    def list_all(self, session_id: str) -> List[MemoryItem]:
+        """返回某个 session 的全部语义记忆，供保留策略统一裁剪。"""
+        return self.store.list_session_items(session_id)
+
+    def prune(self, session_id: str, keep_ids: List[str]) -> int:
+        """
+        同时裁剪向量存储与图存储中的语义记忆。
+
+        修改说明：语义记忆现在由“向量 + 图谱”双通道组成，
+        裁剪时必须保证两边同步，否则会出现一边删了另一边还在召回的脏数据。
+        """
+        vector_pruned = self.store.prune_session(session_id, keep_ids)
+        graph_pruned = self.graph_store.prune_session(session_id, keep_ids)
+        return max(vector_pruned, graph_pruned)
+
     def clear(self, session_id: str) -> None:
         self.store.clear_session(session_id)
         self.graph_store.clear_session(session_id)

@@ -99,9 +99,42 @@ class QdrantVectorStore:
             items.append(MemoryItem.model_validate(payload["memory_item"]))
         return items
 
+    def list_session_items(self, session_id: str) -> List[MemoryItem]:
+        """读取某个 session 的全部语义记忆，供长期保留策略统一裁剪。"""
+        records = self.list_all_records(filters={"session_id": session_id})
+        items: List[MemoryItem] = []
+        for record in records:
+            payload = record.get("payload", {})
+            if "memory_item" not in payload:
+                continue
+            items.append(MemoryItem.model_validate(payload["memory_item"]))
+        items.sort(key=lambda item: item.created_at)
+        return items
+
     def clear_session(self, session_id: str) -> None:
         """兼容语义记忆接口：清空某个 session 的向量记录。"""
         self.clear_records(filters={"session_id": session_id})
+
+    def prune_session(self, session_id: str, keep_ids: List[str]) -> int:
+        """只保留指定 id 的语义记忆，返回本次裁剪掉的条数。"""
+        keep_id_set = set(keep_ids)
+        if self.backend == "qdrant":
+            return self._qdrant_prune_session(session_id=session_id, keep_ids=keep_id_set)
+
+        records = self._load_json_records()
+        kept_records = []
+        pruned_count = 0
+        for record in records:
+            payload = record.get("payload", {})
+            record_session_id = payload.get("session_id")
+            record_id = str(payload.get("_record_id") or record.get("id") or "")
+            if record_session_id == session_id and record_id not in keep_id_set:
+                pruned_count += 1
+                continue
+            kept_records.append(record)
+        if pruned_count > 0:
+            self._save_json_records(kept_records)
+        return pruned_count
 
     def upsert_record(
         self,
@@ -181,6 +214,20 @@ class QdrantVectorStore:
         ]
         records.sort(key=lambda item: item.get("payload", {}).get("created_at", ""), reverse=True)
         return records[:limit]
+
+    def list_all_records(
+        self,
+        *,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """读取满足过滤条件的全部记录，主要给保留策略使用。"""
+        if self.backend == "qdrant":
+            return self._qdrant_scroll_all(filters=filters or {})
+        return [
+            record
+            for record in self._load_json_records()
+            if self._match_filters(record.get("payload", {}), filters or {})
+        ]
 
     def clear_records(self, *, filters: Optional[Dict[str, Any]] = None) -> None:
         """清空满足过滤条件的向量记录。"""
@@ -322,20 +369,7 @@ class QdrantVectorStore:
     def _qdrant_list_recent(self, *, limit: int, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         if self.client is None:
             return []
-        all_points, _ = self.client.scroll(
-            collection_name=self.collection_name,
-            scroll_filter=self._build_qdrant_filter(filters),
-            limit=max(limit, 100),
-            with_payload=True,
-            with_vectors=False,
-        )
-        items = [
-            {
-                "id": str((point.payload or {}).get("_record_id", point.id)),
-                "payload": dict(point.payload or {}),
-            }
-            for point in all_points
-        ]
+        items = self._qdrant_scroll_all(filters=filters)
         items.sort(key=lambda item: item["payload"].get("created_at", ""), reverse=True)
         return items[:limit]
 
@@ -396,6 +430,57 @@ class QdrantVectorStore:
                 filter=self._build_qdrant_filter(filters),
             ),
         )
+
+    def _qdrant_prune_session(self, *, session_id: str, keep_ids: set[str]) -> int:
+        if self.client is None or qdrant_models is None:
+            return 0
+
+        points = self._qdrant_scroll_all(filters={"session_id": session_id}, include_point_id=True)
+        drop_point_ids = [
+            point["point_id"]
+            for point in points
+            if str(point["payload"].get("_record_id") or point.get("id") or "") not in keep_ids
+        ]
+        if not drop_point_ids:
+            return 0
+
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=qdrant_models.PointIdsList(points=drop_point_ids),
+        )
+        return len(drop_point_ids)
+
+    def _qdrant_scroll_all(
+        self,
+        *,
+        filters: Dict[str, Any],
+        include_point_id: bool = False,
+    ) -> List[Dict[str, Any]]:
+        if self.client is None:
+            return []
+
+        all_items: List[Dict[str, Any]] = []
+        offset = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=self._build_qdrant_filter(filters),
+                limit=256,
+                with_payload=True,
+                with_vectors=False,
+                offset=offset,
+            )
+            for point in points:
+                item = {
+                    "id": str((point.payload or {}).get("_record_id", point.id)),
+                    "payload": dict(point.payload or {}),
+                }
+                if include_point_id:
+                    item["point_id"] = point.id
+                all_items.append(item)
+            if offset is None or not points:
+                break
+        return all_items
 
     def _build_qdrant_filter(self, filters: Dict[str, Any]) -> Any:
         if not filters or qdrant_models is None:

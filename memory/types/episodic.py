@@ -21,5 +21,13 @@ class EpisodicMemory(BaseMemory):
     def search(self, session_id: str, query: str, limit: int = 10) -> List[MemoryItem]:
         return list(reversed(self.store.search_items(session_id, query, limit)))
 
+    def list_all(self, session_id: str) -> List[MemoryItem]:
+        """返回某个 session 的全部情景记忆，供保留策略统一裁剪。"""
+        return self.store.list_session_items(session_id)
+
+    def prune(self, session_id: str, keep_ids: List[str]) -> int:
+        """裁剪情景记忆，只保留 keep_ids 中的条目。"""
+        return self.store.prune_session(session_id, keep_ids)
+
     def clear(self, session_id: str) -> None:
         self.store.clear_session(session_id)

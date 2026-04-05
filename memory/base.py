@@ -74,6 +74,10 @@ class MemoryConfig(BaseModel):
     memory_min_content_length: int = 4
     memory_duplicate_window: int = 8
     semantic_min_content_length: int = 8
+    enable_memory_retention: bool = True
+    episodic_retention_max_items: int = 48
+    semantic_retention_max_items: int = 24
+    retention_keep_high_value: bool = True
     persist_user_messages: bool = True
     persist_assistant_messages: bool = True
     persist_tool_messages: bool = False
@@ -184,6 +188,22 @@ class MemoryConfig(BaseModel):
             semantic_min_content_length=_read_int(
                 defaults.semantic_min_content_length,
                 "SEMANTIC_MIN_CONTENT_LENGTH",
+            ),
+            enable_memory_retention=_read_bool(
+                defaults.enable_memory_retention,
+                "ENABLE_MEMORY_RETENTION",
+            ),
+            episodic_retention_max_items=_read_int(
+                defaults.episodic_retention_max_items,
+                "EPISODIC_RETENTION_MAX_ITEMS",
+            ),
+            semantic_retention_max_items=_read_int(
+                defaults.semantic_retention_max_items,
+                "SEMANTIC_RETENTION_MAX_ITEMS",
+            ),
+            retention_keep_high_value=_read_bool(
+                defaults.retention_keep_high_value,
+                "RETENTION_KEEP_HIGH_VALUE",
             ),
             persist_user_messages=_read_bool(
                 defaults.persist_user_messages,

@@ -552,10 +552,13 @@ def test_memory_closure_smoke() -> None:
     1. 低价值内容会不会被过滤
     2. 重复内容会不会被跳过
     3. preference / fact / tool_result 会不会得到不同层级的写入策略
+    4. 长期保留策略会不会优先留下高价值记忆
     """
     config = MemoryConfig.from_env().model_copy(
         update={
             "vector_store_backend": "json",
+            "episodic_retention_max_items": 3,
+            "semantic_retention_max_items": 2,
         }
     )
     memory_manager = MemoryManager(config)
@@ -566,7 +569,9 @@ def test_memory_closure_smoke() -> None:
         ("assistant", "好的。", {"memory_stage": "react_finish"}),
         ("user", "我喜欢美式咖啡，不喜欢太甜的饮品。", {}),
         ("user", "我喜欢美式咖啡，不喜欢太甜的饮品。", {}),
+        ("user", "我最近希望回答更简洁一些。", {}),
         ("assistant", "helloAgent 当前支持 ReAct、Plan-and-Solve、Reflection。", {"memory_stage": "plan_final"}),
+        ("assistant", "昨天我们还讨论了 README 的公开写法。", {}),
         (
             "tool",
             "当前时间为 2026-04-05 20:00:00 中国标准时间+0800",
@@ -597,6 +602,8 @@ def test_memory_closure_smoke() -> None:
     print("记忆闭环冒烟测试")
     print("=" * 24)
     print(memory_manager.build_memory_diagnostics(session_id) or "(没有决策日志)")
+    print("\n长期保留裁剪：")
+    print(memory_manager.build_retention_diagnostics(session_id) or "(没有触发裁剪)")
     print("\n召回解释：")
     print(
         memory_manager.build_recall_diagnostics(

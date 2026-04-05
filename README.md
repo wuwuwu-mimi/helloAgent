@@ -109,6 +109,7 @@ Action: get_time[]
 - `EpisodicMemory`：基于 SQLite / JSON fallback 的持久化记忆
 - `SemanticMemory`：基于“向量检索 + 图谱检索”的双通道语义记忆
 - `MemoryManager`：统一协调写入、召回、去重和 prompt 注入
+- 已补第一版长期保留策略：高价值记忆优先保留，普通闲聊优先淘汰
 - `memory_tool`：支持 `recent / search / context / summary / remember / clear`
 
 当前这套语义检索已经开始兼容真实 Qdrant + Neo4j，当前阶段可以做到：
@@ -131,6 +132,11 @@ Action: get_time[]
   - 长对话时会先提炼一份压缩摘要
   - 摘要当前会优先覆盖 `用户偏好 / 项目事实 / 最近进展`
   - 这样可以减少每轮都把大量原始记忆直接塞进 prompt
+- 长期保留策略当前的规则是：
+  - `episodic / semantic` 都有独立容量上限
+  - 裁剪时不是单纯保留“最近 N 条”，而是优先保留 `偏好 / 事实 / 工具成功结果 / 最终答案`
+  - 同价值候选之间再按新近程度排序
+  - 最近裁剪结果会写入调试日志，便于观察哪些内容被淘汰
 
 后续还会继续往这些方向补：
 
@@ -397,6 +403,15 @@ SESSION_SUMMARY_MIN_MESSAGES=4
 SESSION_SUMMARY_MAX_LINES=6
 ```
 
+如果你想调整长期保留策略，也可以继续加上这些可选配置：
+
+```env
+ENABLE_MEMORY_RETENTION=true
+EPISODIC_RETENTION_MAX_ITEMS=48
+SEMANTIC_RETENTION_MAX_ITEMS=24
+RETENTION_KEEP_HIGH_VALUE=true
+```
+
 如果你想启用真实 Neo4j，可以继续加上这些可选配置：
 
 ```env
@@ -573,6 +588,7 @@ main.run_demo("native_reflection_smoke")
 - 哪些重复消息会被拦截
 - 哪些内容会进入 working / episodic / semantic
 - 最近的记忆写入决策日志
+- 长期保留策略裁剪前后的差异
 - 最近一次召回结果为什么会被选中
 
 在 `tool_schema_smoke` 演示里，会直接看到：
@@ -645,9 +661,9 @@ main.run_demo("native_reflection_smoke")
 - 但还没有把熔断、统计、策略化重试等能力全部围绕它重构完
 - 原生 tool calling 已覆盖 `ReactAgent / Plan-and-Solve / Reflection`，并抽成了公共执行层
 - 但 schema 校验、并行工具调用、失败恢复策略还没有补完整
-- 记忆系统当前已经有第一版写入策略、低价值过滤、重复跳过和决策日志
+- 记忆系统当前已经有第一版写入策略、低价值过滤、重复跳过、长期保留和决策日志
 - 记忆召回当前已经开始带来源和分数解释
-- 但长期保留策略、记忆淘汰和更细的检索解释还没有完全补齐
+- 但更细粒度的淘汰权重、跨 session 整理和更强的检索解释还没有完全补齐
 - 工具系统目前比较轻量
 - 测试还不够系统化
 - 上下文工程目前还是轻量版，虽然已经有字符预算与去重，但还没有做真正的 token 预算

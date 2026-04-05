@@ -106,6 +106,28 @@ class DocumentStore:
             return self.list_recent(session_id, limit)
         return [self._row_to_item(row) for row in rows]
 
+    def list_session_items(self, session_id: str) -> List[MemoryItem]:
+        """读取某个 session 的全部持久化记忆，供保留策略统一裁剪。"""
+        if self.backend == "json":
+            items = [item for item in self._load_json_items() if item.session_id == session_id]
+            items.sort(key=lambda item: item.created_at)
+            return items
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM memory_items
+                    WHERE session_id = ?
+                    ORDER BY created_at ASC
+                    """,
+                    (session_id,),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            self._activate_json_fallback()
+            return self.list_session_items(session_id)
+        return [self._row_to_item(row) for row in rows]
+
     def search_items(self, session_id: str, query: str, limit: int = 10) -> List[MemoryItem]:
         """通过 SQLite LIKE 做一个最小可用的记忆检索。"""
         if self.backend == "json":
@@ -152,6 +174,41 @@ class DocumentStore:
         except sqlite3.OperationalError:
             self._activate_json_fallback()
             self.clear_session(session_id)
+
+    def prune_session(self, session_id: str, keep_ids: List[str]) -> int:
+        """只保留指定 id 的情景记忆，返回本次裁剪掉的条数。"""
+        keep_id_set = set(keep_ids)
+        if self.backend == "json":
+            items = self._load_json_items()
+            kept_items = [
+                item
+                for item in items
+                if item.session_id != session_id or item.id in keep_id_set
+            ]
+            pruned_count = len(items) - len(kept_items)
+            if pruned_count > 0:
+                self._save_json_items(kept_items)
+            return pruned_count
+
+        try:
+            with self._connect() as connection:
+                existing_rows = connection.execute(
+                    "SELECT id FROM memory_items WHERE session_id = ?",
+                    (session_id,),
+                ).fetchall()
+                existing_ids = [str(row["id"]) for row in existing_rows]
+                drop_ids = [item_id for item_id in existing_ids if item_id not in keep_id_set]
+                if not drop_ids:
+                    return 0
+                placeholders = ", ".join("?" for _ in drop_ids)
+                connection.execute(
+                    f"DELETE FROM memory_items WHERE session_id = ? AND id IN ({placeholders})",
+                    [session_id, *drop_ids],
+                )
+                return len(drop_ids)
+        except sqlite3.OperationalError:
+            self._activate_json_fallback()
+            return self.prune_session(session_id, keep_ids)
 
     def _load_json_items(self) -> List[MemoryItem]:
         raw_text = self.fallback_path.read_text(encoding="utf-8") if self.fallback_path.exists() else "[]"

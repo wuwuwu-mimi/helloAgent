@@ -74,6 +74,7 @@ class MemoryManager:
             embedding_service=self.embedding_service,
         )
         self._decision_log: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._retention_log: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 
     def record_message(
         self,
@@ -133,6 +134,7 @@ class MemoryManager:
             self.semantic_memory.add(
                 item.model_copy(update={"memory_type": "semantic", "expires_at": None})
             )
+        self._apply_retention(session_id)
         return item
 
     def recall(
@@ -419,6 +421,7 @@ class MemoryManager:
         self.episodic_memory.clear(session_id)
         self.semantic_memory.clear(session_id)
         self._decision_log.pop(session_id, None)
+        self._retention_log.pop(session_id, None)
 
     def build_memory_diagnostics(self, session_id: str, limit: int = 10) -> str:
         """输出最近几条记忆写入决策，便于观察闭环策略是否生效。"""
@@ -437,6 +440,27 @@ class MemoryManager:
             )
             lines.append(f"   reasons={', '.join(item['reasons'])}")
             lines.append(f"   content={self._trim_summary_line(item['content'], limit=88)}")
+        return "\n".join(lines)
+
+    def build_retention_diagnostics(self, session_id: str, limit: int = 5) -> str:
+        """输出最近几次长期保留裁剪结果，便于观察哪些记忆被淘汰。"""
+        records = self._retention_log.get(session_id, [])
+        if not records:
+            return ""
+
+        lines = ["最近的长期保留裁剪："]
+        for index, item in enumerate(records[-limit:], start=1):
+            lines.append(
+                (
+                    f"{index}. store={item['store_name']} before={item['before_count']} "
+                    f"kept={item['kept_count']} pruned={item['pruned_count']} "
+                    f"limit={item['limit']}"
+                )
+            )
+            if item["dropped"]:
+                lines.append(f"   dropped={', '.join(item['dropped'])}")
+            else:
+                lines.append("   dropped=(无)")
         return "\n".join(lines)
 
     @staticmethod
@@ -655,6 +679,129 @@ class MemoryManager:
         )
         if len(self._decision_log[session_id]) > 40:
             self._decision_log[session_id] = self._decision_log[session_id][-40:]
+
+    def _apply_retention(self, session_id: str) -> None:
+        """按价值优先、时间兜底的方式裁剪长期记忆，避免持久化层无限膨胀。"""
+        if not self.config.enable_memory_retention:
+            return
+        self._apply_single_retention(
+            session_id=session_id,
+            store_name="episodic",
+            items=self.episodic_memory.list_all(session_id),
+            max_items=max(0, self.config.episodic_retention_max_items),
+            prune_callback=self.episodic_memory.prune,
+        )
+        if self.config.enable_semantic_memory:
+            self._apply_single_retention(
+                session_id=session_id,
+                store_name="semantic",
+                items=self.semantic_memory.list_all(session_id),
+                max_items=max(0, self.config.semantic_retention_max_items),
+                prune_callback=self.semantic_memory.prune,
+            )
+
+    def _apply_single_retention(
+        self,
+        *,
+        session_id: str,
+        store_name: str,
+        items: List[MemoryItem],
+        max_items: int,
+        prune_callback: Any,
+    ) -> None:
+        """对单个持久化存储执行裁剪，并把结果记录到 retention log。"""
+        if max_items <= 0 or len(items) <= max_items:
+            return
+
+        keep_items = self._select_items_to_keep(items, max_items=max_items)
+        keep_ids = [item.id for item in keep_items]
+        keep_id_set = set(keep_ids)
+        dropped_items = [item for item in items if item.id not in keep_id_set]
+        pruned_count = int(prune_callback(session_id, keep_ids))
+        self._record_retention_result(
+            session_id=session_id,
+            store_name=store_name,
+            before_count=len(items),
+            kept_count=len(keep_items),
+            pruned_count=pruned_count,
+            limit=max_items,
+            dropped_items=dropped_items,
+        )
+
+    def _select_items_to_keep(self, items: List[MemoryItem], *, max_items: int) -> List[MemoryItem]:
+        """
+        在“高价值优先保留、同价值时偏向最新消息”的规则下选择保留集。
+
+        修改说明：这里不只是简单保留最近 N 条，
+        而是优先保留偏好、事实、工具成功结果、最终答案等更可复用的长期记忆，
+        再用时间顺序兜底，减少重要事实被普通闲聊挤掉。
+        """
+        scored_items = [
+            (
+                self._score_retention_priority(item, recency_index=index, total=len(items)),
+                item.created_at,
+                item,
+            )
+            for index, item in enumerate(items)
+        ]
+        scored_items.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        chosen = [entry[2] for entry in scored_items[:max_items]]
+        return sorted(chosen, key=lambda item: item.created_at)
+
+    def _score_retention_priority(self, item: MemoryItem, *, recency_index: int, total: int) -> int:
+        """为长期保留策略计算优先级分数。"""
+        metadata = item.metadata or {}
+        value_label = str(metadata.get("memory_value", "") or "").lower()
+        reasons = list(metadata.get("memory_reasons", []))
+        content_kind = ""
+        for reason in reasons:
+            if isinstance(reason, str) and reason.startswith("kind="):
+                content_kind = reason.split("=", 1)[1].strip().lower()
+                break
+
+        value_score = {"high": 300, "medium": 200, "low": 100}.get(value_label, 150)
+        kind_bonus = {
+            "preference": 90,
+            "fact": 85,
+            "tool_result_success": 80,
+            "final_answer": 60,
+            "tool_result_failure": 20,
+            "user_dialogue": 10,
+            "assistant_dialogue": 0,
+        }.get(content_kind, 0)
+        high_value_bonus = 40 if self.config.retention_keep_high_value and value_label == "high" else 0
+        user_bonus = 10 if item.role == "user" else 0
+        recency_bonus = recency_index if total > 1 else 1
+        return value_score + kind_bonus + high_value_bonus + user_bonus + recency_bonus
+
+    def _record_retention_result(
+        self,
+        *,
+        session_id: str,
+        store_name: str,
+        before_count: int,
+        kept_count: int,
+        pruned_count: int,
+        limit: int,
+        dropped_items: List[MemoryItem],
+    ) -> None:
+        """记录一次长期保留裁剪结果，便于后续调试与观察。"""
+        self._retention_log[session_id].append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "store_name": store_name,
+                "before_count": before_count,
+                "kept_count": kept_count,
+                "pruned_count": pruned_count,
+                "limit": limit,
+                "dropped": [
+                    self._trim_summary_line(f"[{item.role}] {item.content}", limit=60)
+                    for item in dropped_items
+                ],
+            }
+        )
+        if len(self._retention_log[session_id]) > 20:
+            self._retention_log[session_id] = self._retention_log[session_id][-20:]
 
     def _has_recent_duplicate(self, session_id: str, *, role: str, content: str) -> bool:
         """检查最近窗口内是否已有相同角色和内容的记忆。"""

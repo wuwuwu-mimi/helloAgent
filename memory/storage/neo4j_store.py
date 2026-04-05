@@ -107,6 +107,19 @@ class Neo4jGraphStore:
         ]
         self._save_json_payload(payload)
 
+    def list_session_items(self, session_id: str) -> List[MemoryItem]:
+        """读取某个 session 的全部图谱记忆，供长期保留策略裁剪。"""
+        if self.backend == "neo4j":
+            return self._neo4j_list_all(session_id)
+        payload = self._load_json_payload()
+        facts = [
+            MemoryItem.model_validate(fact["memory_item"])
+            for fact in payload["facts"]
+            if fact.get("session_id") == session_id
+        ]
+        facts.sort(key=lambda item: item.created_at)
+        return facts
+
     def list_recent(self, session_id: str, limit: int = 10) -> List[MemoryItem]:
         """返回最近写入图谱的若干记忆。"""
         if self.backend == "neo4j":
@@ -119,6 +132,53 @@ class Neo4jGraphStore:
         ]
         facts.sort(key=lambda item: item.created_at, reverse=True)
         return facts[:limit]
+
+    def prune_session(self, session_id: str, keep_ids: List[str]) -> int:
+        """只保留指定 id 的图谱记忆，返回本次裁剪掉的条数。"""
+        keep_id_set = set(keep_ids)
+        if self.backend == "neo4j":
+            return self._neo4j_prune_session(session_id=session_id, keep_ids=keep_id_set)
+
+        payload = self._load_json_payload()
+        facts = payload["facts"]
+        kept_facts = [
+            fact
+            for fact in facts
+            if fact.get("session_id") != session_id or fact.get("id") in keep_id_set
+        ]
+        pruned_count = len(facts) - len(kept_facts)
+        if pruned_count <= 0:
+            return 0
+
+        keep_fact_ids = {fact["id"] for fact in kept_facts if fact.get("session_id") == session_id}
+        payload["facts"] = kept_facts
+        payload["edges"] = [
+            edge
+            for edge in payload["edges"]
+            if edge.get("session_id") != session_id or edge.get("item_id") in keep_fact_ids
+        ]
+        referenced_entities = {
+            edge.get("source")
+            for edge in payload["edges"]
+            if edge.get("session_id") == session_id
+        } | {
+            edge.get("target")
+            for edge in payload["edges"]
+            if edge.get("session_id") == session_id
+        }
+        referenced_entities |= {
+            entity
+            for fact in payload["facts"]
+            if fact.get("session_id") == session_id
+            for entity in fact.get("entities", [])
+        }
+        payload["nodes"] = [
+            node
+            for node in payload["nodes"]
+            if node.get("session_id") != session_id or node.get("name") in referenced_entities
+        ]
+        self._save_json_payload(payload)
+        return pruned_count
 
     @classmethod
     def extract_entities(cls, text: str) -> List[str]:
@@ -420,6 +480,55 @@ class Neo4jGraphStore:
                 limit=limit,
             )
             return [MemoryItem.model_validate(json.loads(record["payload"])) for record in records]
+
+    def _neo4j_list_all(self, session_id: str) -> List[MemoryItem]:
+        if self.driver is None:
+            return []
+        with self.driver.session(database=self.config.neo4j_database) as session:
+            records = session.run(
+                """
+                MATCH (m:MemoryFact {session_id: $session_id})
+                RETURN m.payload AS payload
+                ORDER BY m.created_at ASC
+                """,
+                session_id=session_id,
+            )
+            return [MemoryItem.model_validate(json.loads(record["payload"])) for record in records]
+
+    def _neo4j_prune_session(self, *, session_id: str, keep_ids: set[str]) -> int:
+        if self.driver is None:
+            return 0
+        with self.driver.session(database=self.config.neo4j_database) as session:
+            records = session.run(
+                """
+                MATCH (m:MemoryFact {session_id: $session_id})
+                RETURN m.id AS id
+                """,
+                session_id=session_id,
+            )
+            existing_ids = [str(record["id"]) for record in records]
+            drop_ids = [item_id for item_id in existing_ids if item_id not in keep_ids]
+            if not drop_ids:
+                return 0
+            session.run(
+                """
+                MATCH (m:MemoryFact {session_id: $session_id})
+                WHERE m.id IN $drop_ids
+                DETACH DELETE m
+                """,
+                session_id=session_id,
+                drop_ids=drop_ids,
+            )
+            session.run(
+                """
+                MATCH (e:Entity {session_id: $session_id})
+                WHERE NOT (e)<-[:MENTIONS]-(:MemoryFact {session_id: $session_id})
+                  AND NOT (e)-[:RELATED {session_id: $session_id}]-()
+                DETACH DELETE e
+                """,
+                session_id=session_id,
+            )
+            return len(drop_ids)
 
     def _json_upsert_memory(
         self,
