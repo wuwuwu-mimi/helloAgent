@@ -72,10 +72,28 @@ class ToolParameter(BaseModel):
     default: Any = None
     choices: List[Any] = Field(default_factory=list)
     items_type: Optional[str] = None
+    object_properties: List["ToolParameter"] = Field(default_factory=list)
+    items_properties: List["ToolParameter"] = Field(default_factory=list)
     minimum: Optional[float] = None
     maximum: Optional[float] = None
     min_length: Optional[int] = None
     max_length: Optional[int] = None
+
+
+class ToolConditionalRule(BaseModel):
+    """
+    描述一条条件 schema 规则。
+
+    修改说明：把“当 action=search 时 query 不能为空”这类规则抽成统一结构后，
+    同一份约束就可以同时服务于：
+    1. 本地参数校验
+    2. 原生 tool calling schema 导出
+    """
+
+    field: str
+    equals: Any
+    required: List[str] = Field(default_factory=list)
+    non_empty: List[str] = Field(default_factory=list)
 
 
 class Tool(ABC):
@@ -118,26 +136,7 @@ class Tool(ABC):
         required: List[str] = []
 
         for parameter in self.get_parameters():
-            field_schema: Dict[str, Any] = {
-                "type": parameter.type,
-                "description": parameter.description,
-            }
-            if parameter.choices:
-                field_schema["enum"] = list(parameter.choices)
-            if parameter.type == "array" and parameter.items_type:
-                field_schema["items"] = {"type": parameter.items_type}
-            if parameter.minimum is not None:
-                field_schema["minimum"] = parameter.minimum
-            if parameter.maximum is not None:
-                field_schema["maximum"] = parameter.maximum
-            if parameter.min_length is not None:
-                field_schema["minLength"] = parameter.min_length
-            if parameter.max_length is not None:
-                field_schema["maxLength"] = parameter.max_length
-            if parameter.default is not None:
-                field_schema["default"] = parameter.default
-
-            properties[parameter.name] = field_schema
+            properties[parameter.name] = self._build_parameter_schema(parameter)
             if parameter.required:
                 required.append(parameter.name)
 
@@ -147,6 +146,10 @@ class Tool(ABC):
         }
         if required:
             schema["required"] = required
+        conditional_rules = self.get_conditional_rules()
+        all_of = self._build_conditional_schema_blocks(conditional_rules)
+        if all_of:
+            schema["allOf"] = all_of
         return schema
 
     def normalize_parameters(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
@@ -177,6 +180,7 @@ class Tool(ABC):
                 continue
 
             normalized[item.name] = self._normalize_parameter_value(item, parameters[item.name])
+        self._validate_conditional_rules(normalized)
         return self.validate_normalized_parameters(normalized)
 
     def _normalize_parameter_value(self, parameter: ToolParameter, value: Any) -> Any:
@@ -270,6 +274,15 @@ class Tool(ABC):
                 raise ToolValidationError(
                     f"Tool '{self.name}' parameter '{parameter.name}' expects an array."
                 )
+            if parameter.items_properties:
+                item_parameter = ToolParameter(
+                    name=f"{parameter.name}[]",
+                    type="object",
+                    description=parameter.description,
+                    required=True,
+                    object_properties=parameter.items_properties,
+                )
+                return [self._coerce_value(item_parameter, item) for item in value]
             if not parameter.items_type:
                 return value
             item_parameter = ToolParameter(
@@ -285,6 +298,8 @@ class Tool(ABC):
                 raise ToolValidationError(
                     f"Tool '{self.name}' parameter '{parameter.name}' expects an object."
                 )
+            if parameter.object_properties:
+                return self._normalize_object_value(parameter, value)
             return value
 
         # 修改说明：先保底原样返回，后续如果要扩展 date / enum object 等类型，
@@ -312,6 +327,19 @@ class Tool(ABC):
                 raise ToolValidationError(
                     f"Tool '{self.name}' parameter '{parameter.name}' length must be <= {parameter.max_length}."
                 )
+        if isinstance(value, list):
+            if parameter.min_length is not None and len(value) < parameter.min_length:
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' item count must be >= {parameter.min_length}."
+                )
+            if parameter.max_length is not None and len(value) > parameter.max_length:
+                raise ToolValidationError(
+                    f"Tool '{self.name}' parameter '{parameter.name}' item count must be <= {parameter.max_length}."
+                )
+
+    def get_conditional_rules(self) -> List[ToolConditionalRule]:
+        """提供给子类覆盖的条件 schema 规则入口。"""
+        return []
 
     def format_for_prompt(self) -> str:
         """
@@ -383,3 +411,162 @@ class Tool(ABC):
     def _is_retryable_exception(exc: Exception) -> bool:
         """粗略判断一个工具异常是否适合自动重试。"""
         return isinstance(exc, (TimeoutError, ConnectionError, OSError))
+
+    def _normalize_object_value(self, parameter: ToolParameter, value: Dict[str, Any]) -> Dict[str, Any]:
+        """按嵌套 object schema 递归归一化对象参数。"""
+        field_defs = {item.name: item for item in parameter.object_properties}
+        unknown_keys = [key for key in value if key not in field_defs]
+        if unknown_keys:
+            joined = ", ".join(sorted(str(key) for key in unknown_keys))
+            raise ToolValidationError(
+                f"Tool '{self.name}' parameter '{parameter.name}' got unexpected nested keys: {joined}."
+            )
+
+        normalized: Dict[str, Any] = {}
+        for item in parameter.object_properties:
+            has_value = item.name in value and value[item.name] is not None
+            if not has_value:
+                if item.default is not None:
+                    normalized[item.name] = deepcopy(item.default)
+                    continue
+                if item.required:
+                    raise ToolValidationError(
+                        f"Tool '{self.name}' parameter '{parameter.name}.{item.name}' is required."
+                    )
+                continue
+            normalized[item.name] = self._normalize_parameter_value(item, value[item.name])
+        return normalized
+
+    def _build_parameter_schema(self, parameter: ToolParameter) -> Dict[str, Any]:
+        """递归生成单个参数的 schema。"""
+        field_schema: Dict[str, Any] = {
+            "type": parameter.type,
+            "description": parameter.description,
+        }
+        if parameter.choices:
+            field_schema["enum"] = list(parameter.choices)
+        if parameter.type == "array":
+            if parameter.items_properties:
+                field_schema["items"] = self._build_object_schema(parameter.items_properties)
+            elif parameter.items_type:
+                field_schema["items"] = {"type": parameter.items_type}
+        if parameter.type == "object" and parameter.object_properties:
+            field_schema.update(self._build_object_schema(parameter.object_properties))
+        if parameter.minimum is not None:
+            field_schema["minimum"] = parameter.minimum
+        if parameter.maximum is not None:
+            field_schema["maximum"] = parameter.maximum
+        if parameter.min_length is not None:
+            key = "minItems" if parameter.type == "array" else "minLength"
+            field_schema[key] = parameter.min_length
+        if parameter.max_length is not None:
+            key = "maxItems" if parameter.type == "array" else "maxLength"
+            field_schema[key] = parameter.max_length
+        if parameter.default is not None:
+            field_schema["default"] = parameter.default
+        return field_schema
+
+    def _build_object_schema(self, properties: List[ToolParameter]) -> Dict[str, Any]:
+        """生成 object 类型参数的递归 schema。"""
+        property_map: Dict[str, Any] = {}
+        required_fields: List[str] = []
+        for child in properties:
+            property_map[child.name] = self._build_parameter_schema(child)
+            if child.required:
+                required_fields.append(child.name)
+
+        schema: Dict[str, Any] = {
+            "type": "object",
+            "properties": property_map,
+            "additionalProperties": False,
+        }
+        if required_fields:
+            schema["required"] = required_fields
+        return schema
+
+    def _build_conditional_schema_blocks(self, rules: List[ToolConditionalRule]) -> List[Dict[str, Any]]:
+        """把条件规则导出成 JSON schema `if/then` 结构。"""
+        blocks: List[Dict[str, Any]] = []
+        parameter_defs = {item.name: item for item in self.get_parameters()}
+        for rule in rules:
+            if "." in rule.field:
+                continue
+            required_fields = [field for field in rule.required if "." not in field]
+            non_empty_fields = [field for field in rule.non_empty if "." not in field]
+            if not required_fields and not non_empty_fields:
+                continue
+            then_block: Dict[str, Any] = {}
+            merged_required = list(dict.fromkeys(required_fields + non_empty_fields))
+            if merged_required:
+                then_block["required"] = merged_required
+
+            property_overrides: Dict[str, Any] = {}
+            for field in non_empty_fields:
+                parameter = parameter_defs.get(field)
+                if parameter is None:
+                    continue
+                if parameter.type == "string":
+                    property_overrides[field] = {"minLength": max(parameter.min_length or 0, 1)}
+                elif parameter.type == "array":
+                    property_overrides[field] = {"minItems": max(parameter.min_length or 0, 1)}
+            if property_overrides:
+                then_block["properties"] = property_overrides
+            blocks.append(
+                {
+                    "if": {
+                        "properties": {
+                            rule.field: {
+                                "const": rule.equals,
+                            }
+                        },
+                        "required": [rule.field],
+                    },
+                    "then": then_block,
+                }
+            )
+        return blocks
+
+    def _validate_conditional_rules(self, parameters: Dict[str, Any]) -> None:
+        """执行本地条件 schema 校验。"""
+        for rule in self.get_conditional_rules():
+            matched, actual_value = self._read_field(parameters, rule.field)
+            if not matched or actual_value != rule.equals:
+                continue
+
+            for field in rule.required:
+                exists, _ = self._read_field(parameters, field)
+                if not exists:
+                    raise ToolValidationError(
+                        f"Tool '{self.name}' requires parameter '{field}' when {rule.field}={rule.equals}."
+                    )
+
+            for field in rule.non_empty:
+                exists, current = self._read_field(parameters, field)
+                if not exists or self._is_empty_value(current):
+                    raise ToolValidationError(
+                        f"Tool '{self.name}' requires non-empty '{field}' when {rule.field}={rule.equals}."
+                    )
+
+    @staticmethod
+    def _read_field(parameters: Dict[str, Any], field: str) -> tuple[bool, Any]:
+        """支持使用 `a.b.c` 形式读取嵌套字段。"""
+        current: Any = parameters
+        for part in field.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False, None
+            current = current[part]
+        return True, current
+
+    @staticmethod
+    def _is_empty_value(value: Any) -> bool:
+        """判断一个值是否可视为“空”。"""
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value.strip()
+        if isinstance(value, (list, dict, tuple, set)):
+            return len(value) == 0
+        return False
+
+
+ToolParameter.model_rebuild()

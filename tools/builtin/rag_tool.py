@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from memory.rag import RagPipeline
-from tools.builtin.tool_base import Tool, ToolParameter, ToolResult, ToolValidationError
+from tools.builtin.tool_base import Tool, ToolConditionalRule, ToolParameter, ToolResult
 
 
 class RagTool(Tool):
@@ -164,15 +164,19 @@ class RagTool(Tool):
         ]
 
     def validate_normalized_parameters(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """补充 rag_tool 的 action 级必填校验。"""
-        action = str(parameters.get("action", "search")).strip().lower()
-        path = str(parameters.get("path", "")).strip()
-        query = str(parameters.get("query", "")).strip()
-
-        if action == "add" and not path:
-            raise ToolValidationError("Tool 'rag_tool' requires non-empty 'path' when action=add.")
-        if action in {"search", "answer", "context"} and not query:
-            raise ToolValidationError(
-                f"Tool 'rag_tool' requires non-empty 'query' when action={action}."
-            )
+        """当前 action 级校验已经下沉到条件 schema，这里保留扩展入口。"""
         return parameters
+
+    def get_conditional_rules(self) -> List[ToolConditionalRule]:
+        """
+        导出 rag_tool 的条件 schema。
+
+        修改说明：把 action 与 path/query 的依赖关系显式导出后，
+        原生 tool calling 模式也能拿到更贴近真实约束的 schema。
+        """
+        return [
+            ToolConditionalRule(field="action", equals="add", non_empty=["path"]),
+            ToolConditionalRule(field="action", equals="search", non_empty=["query"]),
+            ToolConditionalRule(field="action", equals="answer", non_empty=["query"]),
+            ToolConditionalRule(field="action", equals="context", non_empty=["query"]),
+        ]

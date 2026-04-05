@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from memory.manager import MemoryManager
-from tools.builtin.tool_base import Tool, ToolParameter, ToolResult, ToolValidationError
+from tools.builtin.tool_base import Tool, ToolConditionalRule, ToolParameter, ToolResult
 
 
 class MemoryTool(Tool):
@@ -147,16 +147,20 @@ class MemoryTool(Tool):
         ]
 
     def validate_normalized_parameters(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """补充 action 级别的跨字段校验。"""
-        action = str(parameters.get("action", "recent")).strip().lower()
-        query = str(parameters.get("query", "")).strip()
-        content = str(parameters.get("content", "")).strip()
-
-        if action == "search" and not query:
-            raise ToolValidationError("Tool 'memory_tool' requires non-empty 'query' when action=search.")
-        if action == "remember" and not content:
-            raise ToolValidationError("Tool 'memory_tool' requires non-empty 'content' when action=remember.")
+        """当前 action 级别校验已经下沉到条件 schema，这里保留扩展入口。"""
         return parameters
+
+    def get_conditional_rules(self) -> List[ToolConditionalRule]:
+        """
+        导出 memory_tool 的条件 schema。
+
+        修改说明：这样无论是文本版参数校验，还是原生 tool calling 的 schema 提示，
+        都能共享“search 需要 query / remember 需要 content”这套规则。
+        """
+        return [
+            ToolConditionalRule(field="action", equals="search", non_empty=["query"]),
+            ToolConditionalRule(field="action", equals="remember", non_empty=["content"]),
+        ]
 
     @staticmethod
     def _format_items(items: List[Any]) -> str:

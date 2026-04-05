@@ -95,6 +95,7 @@ Action: get_time[]
 当前迁移到原生 tool calling 的部分是：
 
 - `Tool` 的参数定义会统一导出成 schema
+- schema 现在已经支持：基础类型、枚举、范围、数组、嵌套 object，以及 `if / then` 风格的条件约束
 - `ToolRegistry.get_available_tools()` 会直接生成 OpenAI-compatible `tools` 结构
 - `ReactAgent` 已支持一条“原生 tool calling 主链路”
 - `Plan-and-Solve` 的“步骤求解阶段”已经支持混合 tool calling
@@ -602,6 +603,8 @@ main.run_demo("native_reflection_smoke")
 - 工具自动生成的参数 Schema
 - 字符串参数被归一化为 `integer / boolean`
 - `minimum / maximum / minLength` 等约束会进入 schema
+- 嵌套 object / array 结构会递归进入 schema
+- `mode=fast` 这类条件约束会导出成 `if / then`
 - action 级跨字段规则也可以走本地语义校验
 - 工具执行结果会被包装成统一的 `ToolResult`
 - ToolResult 里的 `meta / data` 已开始接入日志、工具观察和工具记忆
@@ -660,9 +663,8 @@ main.run_demo("native_reflection_smoke")
 
 - 仍然偏学习 / 实验用途，不是生产框架
 - schema 和原生 tool calling 还没有完全接上
-- 工具 schema 当前已经支持类型、默认值、枚举、范围和跨字段语义校验
-- 但还没有补到复杂嵌套结构、条件 schema 和更细的约束
-- 工具执行结果当前已经有第一版 `ToolResult` 协议，并已开始接入日志与工具记忆
+- 工具 schema 当前已经支持类型、默认值、枚举、范围、嵌套 object / array 和条件 schema
+- 工具执行结果当前已经统一为第一版 `ToolResult` 协议，并已接入日志与工具记忆
 - 失败恢复、自动重试和基础降级提示已经有第一版实现
 - 但还没有把熔断、统计、策略化重试等能力全部围绕它重构完
 - 原生 tool calling 已覆盖 `ReactAgent / Plan-and-Solve / Reflection`，并抽成了公共执行层

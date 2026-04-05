@@ -18,7 +18,10 @@
 - `render_for_observation`：把结果渲染成适合回填给 Agent 的 observation 文本。
 
 ### `ToolParameter`
-- 作用：描述单个工具参数，包括类型、默认值、枚举、范围和长度约束。
+- 作用：描述单个工具参数，包括类型、默认值、枚举、范围、长度约束以及嵌套 object / array 结构。
+
+### `ToolConditionalRule`
+- 作用：描述“当某字段等于某值时，另一些字段必须存在或不能为空”的条件 schema 规则。
 
 ### `Tool`
 - 作用：所有工具的抽象父类。
@@ -32,10 +35,18 @@
 - `validate_normalized_parameters`：做更高层的语义校验。
 - `_coerce_value`：把输入转成目标类型。
 - `_validate_parameter_constraints`：校验枚举、范围、长度等约束。
+- `get_conditional_rules`：提供给子类导出的条件 schema 规则。
 - `format_for_prompt`：把工具说明渲染给文本版 Agent 使用。
 - `_coerce_result`：把工具原始返回值转成 `ToolResult`。
 - `_build_exception_result`：把异常转成失败结果。
 - `_is_retryable_exception`：判断异常是否可能值得重试。
+- `_normalize_object_value`：递归归一化 object 类型参数。
+- `_build_parameter_schema`：递归构建单个参数 schema。
+- `_build_object_schema`：构建 object 参数 schema。
+- `_build_conditional_schema_blocks`：把条件规则导出为 `if / then` schema。
+- `_validate_conditional_rules`：在本地执行条件 schema 校验。
+- `_read_field`：读取嵌套字段值。
+- `_is_empty_value`：判断字段是否为空值。
 
 ## 3. `tools/builtin/toolRegistry.py`
 - 作用：统一管理工具注册、获取和导出。
@@ -110,6 +121,13 @@
 - 工具 schema 由 `Tool.get_parameters_schema()` 导出
 - `ToolRegistry.get_available_tools()` 直接组装模型所需的 `tools`
 - 工具执行结果统一折叠成 `ToolResult`
+- `MemoryTool / RagTool` 这类 action 工具，已经把 action 级依赖导出成条件 schema
+
+### 当前 schema 能力
+- 支持基础类型：`string / integer / number / boolean / array / object`
+- 支持默认值、枚举、范围和长度约束
+- 支持嵌套 object 和 array-of-object 结构
+- 支持 `if / then` 风格的条件 schema
 
 ### 对记忆与调试
 - `ToolResult.meta / data` 会进入 observation、日志和工具记忆

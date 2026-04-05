@@ -12,7 +12,7 @@ from memory.rag import RagPipeline
 from tools.builtin.get_time import GetTimeTool
 from tools.builtin.memory_tool import MemoryTool
 from tools.builtin.rag_tool import RagTool
-from tools.builtin.tool_base import Tool, ToolParameter, ToolResult, ToolValidationError
+from tools.builtin.tool_base import Tool, ToolConditionalRule, ToolParameter, ToolResult, ToolValidationError
 from tools.builtin.toolRegistry import ToolRegistry
 
 
@@ -185,6 +185,63 @@ class SchemaSmokeTool(Tool):
                 required=False,
                 default=False,
             ),
+            ToolParameter(
+                name="payload",
+                type="object",
+                description="复杂嵌套对象参数，用于验证 object / array 的递归 schema。",
+                required=False,
+                object_properties=[
+                    ToolParameter(
+                        name="query",
+                        type="string",
+                        description="本次请求的主题。",
+                        min_length=2,
+                    ),
+                    ToolParameter(
+                        name="options",
+                        type="object",
+                        description="额外选项。",
+                        required=False,
+                        default={},
+                        object_properties=[
+                            ToolParameter(
+                                name="timezone",
+                                type="string",
+                                description="可选的时区名称。",
+                                required=False,
+                                default="",
+                            ),
+                            ToolParameter(
+                                name="include_seconds",
+                                type="boolean",
+                                description="是否输出秒。",
+                                required=False,
+                                default=False,
+                            ),
+                        ],
+                    ),
+                    ToolParameter(
+                        name="tags",
+                        type="array",
+                        description="附加标签列表。",
+                        required=False,
+                        default=[],
+                        items_type="string",
+                    ),
+                ],
+            ),
+        ]
+
+    def get_conditional_rules(self) -> list[ToolConditionalRule]:
+        """
+        演示条件 schema：当 mode=fast 时，payload 必须出现。
+
+        修改说明：这样 smoke test 可以同时看到：
+        1. schema 里已经导出了 `if/then`
+        2. 本地执行前也会走同一套条件校验
+        """
+        return [
+            ToolConditionalRule(field="mode", equals="fast", required=["payload"]),
         ]
 
     def validate_normalized_parameters(self, parameters: dict[str, object]) -> dict[str, object]:
@@ -988,6 +1045,14 @@ def test_tool_schema_smoke() -> None:
             "mode": "safe",
             "level": "3",
             "dry_run": "true",
+            "payload": {
+                "query": "本地时间",
+                "options": {
+                    "timezone": "Asia/Shanghai",
+                    "include_seconds": "true",
+                },
+                "tags": ["clock", "demo"],
+            },
         }
     )
 
@@ -1022,11 +1087,45 @@ def test_tool_schema_smoke() -> None:
 
     print("\n跨字段语义校验示例：")
     try:
-        tool.normalize_parameters({"mode": "fast", "level": "1", "dry_run": "false"})
+        tool.normalize_parameters(
+            {
+                "mode": "fast",
+                "level": "1",
+                "dry_run": "false",
+                "payload": {"query": "时间"},
+            }
+        )
     except ToolValidationError as exc:
         print(str(exc))
     else:
         print("未触发预期错误，请检查跨字段校验逻辑。")
+
+    print("\n复杂嵌套结构示例：")
+    try:
+        tool.normalize_parameters(
+            {
+                "mode": "safe",
+                "level": "3",
+                "dry_run": "false",
+                "payload": {
+                    "query": "x",
+                    "options": {"include_seconds": "true"},
+                    "tags": ["clock", 3],
+                },
+            }
+        )
+    except ToolValidationError as exc:
+        print(str(exc))
+    else:
+        print("未触发预期错误，请检查嵌套 schema 校验逻辑。")
+
+    print("\n条件 schema 示例：")
+    try:
+        tool.normalize_parameters({"mode": "fast", "level": "3", "dry_run": "false"})
+    except ToolValidationError as exc:
+        print(str(exc))
+    else:
+        print("未触发预期错误，请检查条件 schema 校验逻辑。")
 
 
 def test_tool_recovery_smoke() -> None:
