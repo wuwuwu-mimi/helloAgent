@@ -99,7 +99,7 @@ Action: get_time[]
 - `EpisodicMemory`：基于 SQLite / JSON fallback 的持久化记忆
 - `SemanticMemory`：基于“向量检索 + 图谱检索”的双通道语义记忆
 - `MemoryManager`：统一协调写入、召回、去重和 prompt 注入
-- `memory_tool`：支持 `recent / search / context / remember / clear`
+- `memory_tool`：支持 `recent / search / context / summary / remember / clear`
 
 当前这套语义检索已经开始兼容真实 Qdrant + Neo4j，当前阶段可以做到：
 
@@ -117,6 +117,10 @@ Action: get_time[]
   - `用户偏好`
   - `项目事实`
   - `近期对话`
+- 在原始记忆条目之上，当前还新增了一层“会话摘要”：
+  - 长对话时会先提炼一份压缩摘要
+  - 摘要当前会优先覆盖 `用户偏好 / 项目事实 / 最近进展`
+  - 这样可以减少每轮都把大量原始记忆直接塞进 prompt
 
 后续还会继续往这些方向补：
 
@@ -166,6 +170,7 @@ Action: get_time[]
 
 - 用户偏好
 - 项目事实
+- 会话摘要
 - 近期对话摘要
 
 在 `rag_first` 路由下，系统会更强调：
@@ -182,6 +187,13 @@ Action: get_time[]
   - 用户偏好冲突时，记忆优先
   - 项目 / 文档事实冲突时，RAG 证据优先
 - 这一步的目标不是自动裁决真相，而是防止模型把相反说法强行揉成一个新事实
+
+现在记忆层的整体结构已经大致变成：
+
+- 原始记忆条目
+- 结构化记忆分组
+- 会话摘要
+- 自动路由后的上下文注入
 
 ## 当前的 embedding 进展
 
@@ -354,6 +366,15 @@ TOOL_CONTEXT_OBSERVATION_LIMIT=4
 ENABLE_CONTEXT_CONFLICT_RESOLUTION=true
 ```
 
+如果你想调整会话摘要行为，也可以继续加上这些可选配置：
+
+```env
+ENABLE_SESSION_SUMMARY=true
+SESSION_SUMMARY_RECENT_ITEMS=12
+SESSION_SUMMARY_MIN_MESSAGES=4
+SESSION_SUMMARY_MAX_LINES=6
+```
+
 如果你想启用真实 Neo4j，可以继续加上这些可选配置：
 
 ```env
@@ -434,6 +455,15 @@ main.configure_logging()
 main.run_demo("conflict_smoke")
 ```
 
+如果你想看“长对话时会话摘要是怎么生成并注入上下文的”，可以执行：
+
+```python
+import main
+
+main.configure_logging()
+main.run_demo("summary_smoke")
+```
+
 如果配置正确，终端会输出：
 
 - 最终答案
@@ -482,6 +512,12 @@ main.run_demo("conflict_smoke")
 - 哪些说法被判定为潜在冲突
 - 当前应该优先采用哪一侧来源
 
+在 `summary_smoke` 演示里，会直接看到：
+
+- 单独生成的会话摘要
+- 摘要被注入后的完整上下文
+- 摘要层与原始结构化记忆层是如何同时存在的
+
 如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
 ## 当前支持的 Provider 方向
@@ -513,6 +549,7 @@ main.run_demo("conflict_smoke")
 - 自动 RAG 注入目前还是启发式触发，不是完整的 query planner
 - memory / rag / tool 的上下文路由目前也是启发式规则，不是训练得到的策略模型
 - 冲突检测目前主要覆盖“用户偏好 / 支持关系 / 包含关系”等常见模式，还不是通用事实校验器
+- 会话摘要目前还是规则式摘要，不是基于 LLM 的抽象总结器
 - 文档会继续补充，目录结构也可能继续调整
 
 ## 接下来准备继续做的事情

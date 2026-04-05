@@ -216,6 +216,73 @@ class MemoryManager:
             blocks.append(f"{title}：\n" + "\n".join(f"- {line}" for line in lines))
         return "\n\n".join(blocks)
 
+    def build_session_summary(
+        self,
+        *,
+        session_id: str,
+        query: Optional[str] = None,
+        exclude_text: Optional[str] = None,
+    ) -> str:
+        """
+        生成一个轻量的会话摘要。
+
+        修改说明：长对话场景下，如果每次都把原始记忆条目整段塞进 prompt，
+        上下文很快会膨胀；这里先用规则式方法提炼“偏好 / 事实 / 最近进展”的摘要层。
+        """
+        if not self.config.enable_session_summary:
+            return ""
+
+        recent_items = self._dedupe_items(
+            [
+                *self.working_memory.recent(session_id, self.config.session_summary_recent_items),
+                *self.episodic_memory.recent(session_id, self.config.session_summary_recent_items),
+            ],
+            limit=self.config.session_summary_recent_items,
+            exclude_text=exclude_text,
+        )
+        if len(recent_items) < self.config.session_summary_min_messages:
+            return ""
+
+        grouped_recent: Dict[str, List[MemoryItem]] = {
+            "用户偏好": [],
+            "项目事实": [],
+            "近期对话": [],
+        }
+        for item in recent_items:
+            grouped_recent[self._classify_memory_item(item)].append(item)
+
+        summary_lines: List[str] = []
+
+        preferences = grouped_recent.get("用户偏好", [])[:2]
+        if preferences:
+            summary_lines.append("用户偏好:")
+            summary_lines.extend(
+                f"- [{item.role}] {self._trim_summary_line(item.content)}"
+                for item in preferences
+            )
+
+        facts = grouped_recent.get("项目事实", [])[:2]
+        if facts:
+            summary_lines.append("项目事实:")
+            summary_lines.extend(
+                f"- [{item.role}] {self._trim_summary_line(item.content)}"
+                for item in facts
+            )
+
+        recent_dialogue = grouped_recent.get("近期对话", [])[-2:]
+        if recent_dialogue:
+            summary_lines.append("最近进展:")
+            summary_lines.extend(
+                f"- [{item.role}] {self._trim_summary_line(item.content)}"
+                for item in recent_dialogue
+            )
+
+        if not summary_lines:
+            return ""
+
+        capped_lines = summary_lines[: self.config.session_summary_max_lines]
+        return "\n".join(capped_lines)
+
     def clear_session(self, session_id: str) -> None:
         """清空某个 session 的全部记忆。"""
         self.working_memory.clear(session_id)
@@ -251,3 +318,11 @@ class MemoryManager:
         if any(marker in content for marker in cls._FACT_MARKERS):
             return "项目事实"
         return "近期对话"
+
+    @staticmethod
+    def _trim_summary_line(text: str, limit: int = 72) -> str:
+        """裁剪摘要里的单行文本，避免单条摘要过长。"""
+        compact = " ".join(text.split())
+        if len(compact) <= limit:
+            return compact
+        return f"{compact[:limit].rstrip()}..."

@@ -66,6 +66,10 @@ class MemoryConfig(BaseModel):
     rag_chunk_size: int = 300
     rag_chunk_overlap: int = 60
     rag_top_k: int = 3
+    enable_session_summary: bool = True
+    session_summary_recent_items: int = 12
+    session_summary_min_messages: int = 4
+    session_summary_max_lines: int = 6
     persist_user_messages: bool = True
     persist_assistant_messages: bool = True
     persist_tool_messages: bool = False
@@ -145,6 +149,22 @@ class MemoryConfig(BaseModel):
             rag_chunk_size=_read_int(defaults.rag_chunk_size, "RAG_CHUNK_SIZE"),
             rag_chunk_overlap=_read_int(defaults.rag_chunk_overlap, "RAG_CHUNK_OVERLAP"),
             rag_top_k=_read_int(defaults.rag_top_k, "RAG_TOP_K"),
+            enable_session_summary=_read_bool(
+                defaults.enable_session_summary,
+                "ENABLE_SESSION_SUMMARY",
+            ),
+            session_summary_recent_items=_read_int(
+                defaults.session_summary_recent_items,
+                "SESSION_SUMMARY_RECENT_ITEMS",
+            ),
+            session_summary_min_messages=_read_int(
+                defaults.session_summary_min_messages,
+                "SESSION_SUMMARY_MIN_MESSAGES",
+            ),
+            session_summary_max_lines=_read_int(
+                defaults.session_summary_max_lines,
+                "SESSION_SUMMARY_MAX_LINES",
+            ),
             persist_user_messages=_read_bool(
                 defaults.persist_user_messages,
                 "PERSIST_USER_MESSAGES",

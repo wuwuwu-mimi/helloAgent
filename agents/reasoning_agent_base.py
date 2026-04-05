@@ -130,6 +130,14 @@ class ReasoningAgentBase(Agent):
             ]
         )
         memory_sections = self._build_auto_memory_sections(route)
+        session_summary = self._build_session_summary(route)
+        if session_summary:
+            builder.add_notes(
+                "会话摘要",
+                session_summary,
+                priority=int(route["memory_priority"]) + 5,
+                source="session_summary",
+            )
         for section in memory_sections:
             builder.add_notes(
                 section["title"],
@@ -162,6 +170,19 @@ class ReasoningAgentBase(Agent):
                 source="conflict_resolution",
             )
         return builder.build()
+
+    def _build_session_summary(self, route: Dict[str, int | str | bool]) -> str:
+        """生成当前会话的轻量摘要，作为详细记忆前的一层压缩上下文。"""
+        if self.memory_manager is None:
+            return ""
+        if bool(route.get("prefer_rag")) and not bool(route.get("prefer_memory")):
+            # 修改说明：纯文档问答时减少摘要注入，避免会话摘要把 prompt 重点从证据检索拉偏。
+            return ""
+        return self.memory_manager.build_session_summary(
+            session_id=self.session_id,
+            query=self.current_input,
+            exclude_text=self.current_input,
+        )
 
     def _build_auto_memory_sections(self, route: Dict[str, int | str | bool]) -> List[Dict[str, int | str]]:
         """按当前路由策略生成结构化记忆 section。"""

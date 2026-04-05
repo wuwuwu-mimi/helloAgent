@@ -532,6 +532,61 @@ def test_context_conflict_smoke() -> None:
     print(rendered or "(没有生成上下文)")
 
 
+def test_summary_smoke() -> None:
+    """
+    运行一个会话摘要冒烟测试。
+
+    修改说明：这里构造一段更长的对话，确认系统能把多条记忆压缩成摘要层，
+    而不是只把原始条目一股脑塞进上下文。
+    """
+    memory_manager = build_memory_manager()
+    session_id = "summary_smoke"
+    memory_manager.clear_session(session_id)
+    seed_messages = [
+        ("user", "我喜欢美式咖啡，不喜欢过甜饮品。"),
+        ("assistant", "好的，我记住了你的饮品偏好。"),
+        ("user", "helloAgent 目前重点在做记忆系统和上下文工程。"),
+        ("assistant", "明白了，当前项目重点是记忆系统和上下文工程。"),
+        ("user", "后面你回答时可以优先简洁一点。"),
+        ("assistant", "收到，后续我会优先用更简洁的方式回答。"),
+    ]
+    for role, content in seed_messages:
+        memory_manager.record_message(session_id=session_id, role=role, content=content)
+
+    rag_pipeline = build_rag_pipeline(memory_manager)
+    registry = build_tool_registry(memory_manager, session_id, rag_pipeline)
+    agent = ReactAgent(
+        name="summary_smoke",
+        llm=object(),  # type: ignore[arg-type]
+        tool_registry=registry,
+        config=Config.from_env(),
+        max_steps=1,
+        memory_manager=memory_manager,
+        session_id=session_id,
+    )
+    agent._start_new_run("你总结一下我当前的偏好和项目重点。")
+    rendered = agent._build_context_packet().render(
+        max_chars=agent.config.context_max_chars,
+        max_sections=agent.config.context_max_sections,
+        section_max_chars=agent.config.context_section_max_chars,
+    )
+
+    print("\n" + "=" * 24)
+    print("会话摘要测试")
+    print("=" * 24)
+    print("单独摘要：")
+    print(
+        memory_manager.build_session_summary(
+            session_id=session_id,
+            query="你总结一下我当前的偏好和项目重点。",
+            exclude_text="你总结一下我当前的偏好和项目重点。",
+        )
+        or "(没有生成摘要)"
+    )
+    print("\n注入后的上下文：")
+    print(rendered or "(没有生成上下文)")
+
+
 def run_demo(target: str = "reflection") -> None:
     """根据名称运行指定的示例，方便你在一个入口里切换不同 Agent。"""
     demos = {
@@ -545,6 +600,7 @@ def run_demo(target: str = "reflection") -> None:
         "context_smoke": test_context_engineering_smoke,
         "routing_smoke": test_context_routing_smoke,
         "conflict_smoke": test_context_conflict_smoke,
+        "summary_smoke": test_summary_smoke,
     }
     if target not in demos:
         raise ValueError(f"不支持的测试目标: {target}，可选值: {', '.join(demos)}")

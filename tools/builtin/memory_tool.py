@@ -23,6 +23,7 @@ class MemoryTool(Tool):
         - recent: 查看最近记忆
         - search: 按 query 搜索记忆
         - context: 返回结构化记忆上下文
+        - summary: 返回当前会话摘要
         - remember: 手动写入一条记忆
         - clear: 清空当前会话记忆
         """
@@ -52,6 +53,15 @@ class MemoryTool(Tool):
             )
             return rendered or "没有找到相关记忆。"
 
+        if action == "summary":
+            query = str(parameters.get("query", "")).strip()
+            rendered = self.memory_manager.build_session_summary(
+                session_id=self.session_id,
+                query=query or None,
+                exclude_text=query or None,
+            )
+            return rendered or "当前还没有足够的会话内容可供摘要。"
+
         if action == "remember":
             content = str(parameters.get("content", "")).strip()
             if not content:
@@ -75,7 +85,7 @@ class MemoryTool(Tool):
             ToolParameter(
                 name="action",
                 type="string",
-                description="动作类型，可选 recent/search/context/remember/clear。",
+                description="动作类型，可选 recent/search/context/summary/remember/clear。",
             ),
             ToolParameter(
                 name="query",
