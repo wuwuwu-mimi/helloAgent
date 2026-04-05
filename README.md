@@ -266,8 +266,13 @@ helloAgent/
 │     ├─ get_time.py           # 示例工具：获取本地时间
 │     ├─ memory_tool.py        # 记忆工具
 │     └─ rag_tool.py           # 本地检索工具
+├─ docs/
+│  ├─ architecture.md          # 项目结构、core 模块与阅读顺序
+│  ├─ agents.md                # Agent 文件、类、方法说明
+│  ├─ memory.md                # 记忆、RAG、存储层说明
+│  └─ tools.md                 # 工具系统说明
 ├─ main.py                     # 当前测试入口
-├─ PROJECT_DOC.md              # 项目总文档：文件、类、方法作用说明
+├─ PROJECT_DOC.md              # 根目录文档索引，指向 docs/ 下的详细说明
 ├─ README.md
 └─ LICENSE
 ```
@@ -689,7 +694,12 @@ main.run_demo("native_reflection_smoke")
 当前阶段性的收尾优先级，我也单独整理到了仓库根目录的 `TODO.md`。
 
 如果你想快速了解整个仓库里“每个文件 / 类 / 方法分别负责什么”，
-可以直接先看根目录的 `PROJECT_DOC.md`。
+可以先看根目录的 `PROJECT_DOC.md`，再按顺序进入：
+
+- `docs/architecture.md`
+- `docs/agents.md`
+- `docs/memory.md`
+- `docs/tools.md`
 
 ## 为什么公开这个仓库
 
