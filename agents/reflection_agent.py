@@ -5,6 +5,7 @@ import re
 from typing import Any, List, Optional, Tuple
 
 from core import Config, HelloAgentsLLM
+from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 
 from .react_agent import ReactAgent
@@ -102,6 +103,8 @@ class ReflectionAgent(ReactAgent):
         draft_prompt: Optional[str] = None,
         review_prompt: Optional[str] = None,
         revision_prompt: Optional[str] = None,
+        memory_manager: Optional[MemoryManager] = None,
+        session_id: Optional[str] = None,
     ) -> None:
         # 修改说明：草稿阶段直接复用 ReactAgent 的工具解析与执行能力，避免维护两套相似逻辑。
         super().__init__(
@@ -112,6 +115,8 @@ class ReflectionAgent(ReactAgent):
             config=config,
             max_steps=max_steps,
             custom_prompt=draft_prompt or REFLECTION_DRAFT_PROMPT,
+            memory_manager=memory_manager,
+            session_id=session_id,
         )
         self.max_reflections = max_reflections
         self.review_prompt = review_prompt or REFLECTION_REVIEW_PROMPT
@@ -150,6 +155,7 @@ class ReflectionAgent(ReactAgent):
             logger.info("[%s] 第 %s 次反思决定: %s", self.name, round_index, decision)
 
             if decision == "finish":
+                self._remember_assistant_text(answer, metadata={"memory_stage": "reflection_finish"})
                 logger.info("[%s] 反思结束，直接采用当前答案。", self.name)
                 return answer
 
@@ -161,6 +167,7 @@ class ReflectionAgent(ReactAgent):
             )
             self.current_history.append(f"Revision {round_index}: {answer}")
 
+        self._remember_assistant_text(answer, metadata={"memory_stage": "reflection_final"})
         logger.info("[%s] 已达到最大反思轮数，返回最后一次修订结果。", self.name)
         return answer
 

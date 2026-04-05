@@ -10,3 +10,11 @@ __pycache__/
 
 # IDE settings.
 .idea/
+
+# Runtime memory data and local test artifacts.
+# 修改说明：这些文件都是本地调试/测试时生成的运行产物，不适合提交到公开仓库。
+data/
+tmp_utf8*.txt
+simple_sqlite_test.db
+simple_sqlite_test.db-journal
+memory.md

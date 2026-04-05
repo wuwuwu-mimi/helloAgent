@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from core import Config, HelloAgentsLLM, Message
+from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 from tools.builtin.tool_base import Tool
 
@@ -55,6 +56,8 @@ class ReactAgent(ReasoningAgentBase):
         config: Optional[Config] = None,
         max_steps: int = 5,
         custom_prompt: Optional[str] = None,
+        memory_manager: Optional[MemoryManager] = None,
+        session_id: Optional[str] = None,
     ) -> None:
         # 修改说明：工具注册、prompt 模板和运行期 history 现在都交给公共父类管理。
         super().__init__(
@@ -64,6 +67,8 @@ class ReactAgent(ReasoningAgentBase):
             prompt_template=custom_prompt or MY_REACT_PROMPT,
             system_prompt=system_prompt,
             config=config,
+            memory_manager=memory_manager,
+            session_id=session_id,
         )
         self.max_steps = max_steps
 
@@ -112,6 +117,7 @@ class ReactAgent(ReasoningAgentBase):
 
             if action_type == "finish":
                 final_answer = action_input or ""
+                self._remember_assistant_text(final_answer, metadata={"memory_stage": "react_finish"})
                 logger.info("[step %s] 任务完成，最终答案: %s", step, self._preview(final_answer))
                 return final_answer
 
@@ -119,6 +125,7 @@ class ReactAgent(ReasoningAgentBase):
             self._append_observation(observation)
 
         fallback = f"Reached max steps ({self.max_steps}) without Finish."
+        self._remember_assistant_text(fallback, metadata={"memory_stage": "react_fallback"})
         logger.warning("[%s] %s", self.name, fallback)
         return fallback
 

@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from core import Config, HelloAgentsLLM
+from memory.manager import MemoryManager
 from tools.builtin.toolRegistry import ToolRegistry
 
 from .react_agent import ReactAgent
@@ -99,6 +100,8 @@ class PlanAndSolveAgent(ReactAgent):
         plan_prompt: Optional[str] = None,
         step_prompt: Optional[str] = None,
         final_prompt: Optional[str] = None,
+        memory_manager: Optional[MemoryManager] = None,
+        session_id: Optional[str] = None,
     ) -> None:
         # 这里复用 ReactAgent 的工具执行与解析能力，避免维护两套同类逻辑。
         super().__init__(
@@ -109,6 +112,8 @@ class PlanAndSolveAgent(ReactAgent):
             config=config,
             max_steps=max_steps,
             custom_prompt=step_prompt or STEP_PROMPT,
+            memory_manager=memory_manager,
+            session_id=session_id,
         )
         self.max_step_rounds = max_step_rounds
         self.plan_prompt = plan_prompt or PLAN_PROMPT
@@ -139,6 +144,7 @@ class PlanAndSolveAgent(ReactAgent):
 
         if not plan:
             fallback = "Planning failed: could not generate a valid plan."
+            self._remember_assistant_text(fallback, metadata={"memory_stage": "plan_failed"})
             logger.warning("[%s] %s", self.name, fallback)
             return fallback
 
@@ -156,6 +162,7 @@ class PlanAndSolveAgent(ReactAgent):
             self.current_history.append(f"StepResult {index}: {step_result}")
 
         final_answer = self._generate_final_answer(input_text, plan, self.last_step_results, **kwargs)
+        self._remember_assistant_text(final_answer, metadata={"memory_stage": "plan_final"})
         logger.info("[%s] Plan-and-Solve 完成: %s", self.name, self._preview(final_answer))
         return final_answer
 

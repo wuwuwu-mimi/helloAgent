@@ -1,71 +1,145 @@
 # helloAgent
 
-**一个Agent练习项目** 帮助理解Agent的工作方式
+一个从零手写 Agent 的练习项目。
 
-这个仓库当前有
-从零搭一个最小可运行的 Agent 骨架，先把 `prompt -> 推理 -> 工具调用 -> 观察结果 -> 最终回答` 这条链路跑通，再逐步往上加能力。
+这个仓库的目标不是直接做成“大而全”的 Agent 框架，而是先把最核心的链路一段一段搭起来：
 
-目前它还不是一个完整框架，更像是一个持续演进中的实验项目 / 学习记录。
+`Prompt -> 推理 -> 工具调用 -> Observation -> 最终回答`
 
-## 当前状态
+目前项目更像是一个持续演进中的实验场 / 学习记录，适合用来理解不同 Agent 范式在代码层面到底是怎么工作的。
 
-当前已经有的内容：
+## 当前已实现
 
-- 一个最小可运行的文本版 ReAct Agent
-- 一个简单的工具注册器 `ToolRegistry`
+目前仓库里已经有这些内容：
+
+- 一个文本解析版 `ReAct Agent`
+- 一个 `Plan-and-Solve Agent`
+- 一个 `Reflection Agent`
+- 一个分层记忆系统：`Working / Episodic / Semantic`
+- 一个公共父类 `ReasoningAgentBase`，用于复用消息构建、LLM 请求和运行期历史管理
+- 一个工具基类 `Tool`
+- 一个工具注册器 `ToolRegistry`
 - 一个内置示例工具 `get_time`
-- 一个统一的 LLM 调用层，兼容 OpenAI-compatible 接口
-- 一个 `main.py` 测试入口，用来验证 Agent 是否能正确调用工具
+- 一个内置记忆工具 `memory_tool`
+- 一个统一的 OpenAI-compatible LLM 调用层
+- 一个本地可运行的离线 embedding 实现
+- 一个 Qdrant 风格的本地向量存储适配层（当前先用 JSON 落盘）
+- 一个 `main.py` 演示入口
 
-当前示例流程是：
+## 当前支持的 Agent 范式
 
-1. 用户提问“现在几点”
-2. Agent 让模型输出 `Thought` / `Action`
-3. 模型选择调用 `get_time[]`
-4. Agent 执行工具，把结果写回 `Observation`
-5. 模型根据观察结果生成最终答案
+### 1. ReAct
 
-## 目前的实现思路
-
-这个项目当前采用的是“文本解析版 ReAct”方式，而不是原生 function calling。
-
-也就是说，模型不会直接返回结构化 `tool_calls`，而是被要求输出类似下面的文本：
+核心思路是让模型输出：
 
 ```text
 Thought: 我需要先获取当前时间。
 Action: get_time[]
 ```
 
-然后由 Agent 自己完成：
+然后由 Agent 自己负责：
 
-- 解析 `Thought` / `Action`
-- 识别工具名和参数
+- 解析 `Thought / Action`
+- 找到对应工具
 - 执行工具
-- 把工具结果追加为 `Observation`
+- 把结果写回 `Observation`
 - 继续下一轮推理
 
-这样做的好处是结构简单、便于学习，也更容易看清 Agent 的主循环到底在做什么。
+这是一种非常适合学习 Agent 主循环的最小实现方式。
+
+### 2. Plan-and-Solve
+
+先生成计划，再按步骤逐步求解。
+
+这个版本适合观察：
+
+- 计划生成
+- 步骤级求解
+- 步骤结果汇总
+- 最终答案合成
+
+### 3. Reflection
+
+先生成草稿答案，再做一次自我审查，最后按需修订。
+
+当前实现里还额外加了一层保护：
+
+- 反思阶段不能随意改写已经由工具确认过的事实
+- 如果修订结果丢失了关键工具事实，会回退到上一版答案
+
+这部分主要是为了减少“模型润色时把工具结果改错”的问题。
+
+## 当前实现风格
+
+这个项目当前采用的是“文本解析版 Agent”，而不是完全依赖原生 function calling。
+
+也就是说：
+
+- 模型主要输出文本格式的 `Thought / Action`
+- Agent 自己负责解析和控制工具执行
+- 工具系统已经抽成了对象化结构，但 schema / 原生 tool calling 还没有完全接上
+
+这样做的好处是：
+
+- 代码路径清晰
+- 容易调试
+- 容易理解每一步到底发生了什么
+- 适合逐步演进到更完整的 Agent 结构
+
+## 当前的记忆系统进展
+
+目前记忆能力已经走到“最小可用 + 可继续演进”的阶段：
+
+- `WorkingMemory`：纯内存、带 TTL，用来保存最近上下文
+- `EpisodicMemory`：基于 SQLite / JSON fallback 的持久化记忆
+- `SemanticMemory`：基于本地 embedding + 向量检索的最小语义记忆
+- `MemoryManager`：统一协调写入、召回、去重和 prompt 注入
+- `memory_tool`：支持 `recent / search / remember / clear`
+
+当前这套语义检索还不是完整的生产级 embedding / Qdrant 方案，但已经能：
+
+- 把长期记忆同步写入向量存储
+- 在后续 query 中做最小语义召回
+- 在没有额外服务依赖时直接本地运行
+
+后续还会继续往这些方向补：
+
+- 真正的 Qdrant 服务接入
+- Neo4j 图谱记忆
+- 更完整的 RAG pipeline
+- `rag_tool`
 
 ## 项目结构
-
-当前目录大致如下：
 
 ```text
 helloAgent/
 ├─ agents/
-│  ├─ agentBase.py          # Agent 基类
-│  └─ react_agent.py        # 文本版 ReAct Agent 主逻辑
+│  ├─ agent_base.py            # Agent 抽象基类
+│  ├─ reasoning_agent_base.py  # 多种推理型 Agent 的公共父类
+│  ├─ react_agent.py           # 文本版 ReAct Agent
+│  ├─ plan_and_solve.py        # Plan-and-Solve Agent
+│  └─ reflection_agent.py      # Reflection Agent
 ├─ core/
-│  ├─ Config.py             # 配置读取与默认参数
-│  ├─ llm_client.py         # OpenAI-compatible LLM 封装
-│  ├─ message.py            # 统一消息结构
+│  ├─ Config.py                # 配置读取与默认参数
+│  ├─ llm_client.py            # OpenAI-compatible LLM 封装
+│  ├─ message.py               # 统一消息结构
 │  └─ __init__.py
+├─ memory/
+│  ├─ base.py                  # 记忆核心数据结构与配置
+│  ├─ manager.py               # 统一记忆协调器
+│  ├─ embedding.py             # 离线 embedding / 向量相似度能力
+│  ├─ types/                   # 各类记忆实现
+│  ├─ storage/                 # SQLite / 向量存储适配
+│  └─ rag/                     # 预留给后续 RAG 能力
 ├─ tools/
 │  └─ builtin/
-│     ├─ get_time.py        # 示例工具：获取本地时间
-│     └─ toolRegistry.py    # 工具注册器
-├─ main.py                  # 当前测试入口
-└─ README.md
+│     ├─ tool_base.py          # 工具基类
+│     ├─ toolRegistry.py       # 工具注册器
+│     ├─ get_time.py           # 示例工具：获取本地时间
+│     └─ memory_tool.py        # 记忆工具
+├─ main.py                     # 当前测试入口
+├─ README.md
+└─ LICENSE
 ```
 
 ## 快速开始
@@ -76,13 +150,13 @@ helloAgent/
 python -m venv .venv
 ```
 
-Windows PowerShell:
+Windows PowerShell：
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-macOS / Linux:
+macOS / Linux：
 
 ```bash
 source .venv/bin/activate
@@ -90,7 +164,7 @@ source .venv/bin/activate
 
 ### 2. 安装依赖
 
-当前代码至少依赖这些包：
+当前建议直接手动安装这些包：
 
 ```bash
 pip install openai python-dotenv pydantic
@@ -98,52 +172,57 @@ pip install openai python-dotenv pydantic
 
 说明：
 
-- 仓库里目前还没有完整、稳定的公开依赖清单
-- 后续我会再整理正式的 `requirements.txt` 或 `pyproject.toml`
+- 仓库里的依赖清单还没有整理成正式可发布版本
+- 后续会补更规范的 `requirements.txt` 或 `pyproject.toml`
 
 ### 3. 配置环境变量
 
 项目会从 `.env` 或系统环境变量中读取模型配置。
 
-最简单的方式是准备一个本地 `.env` 文件，例如：
+例如你可以准备一个本地 `.env`：
 
 ```env
 DEFAULT_PROVIDER=deepseek
 DEFAULT_MODEL=deepseek-chat
 DEEPSEEK_API_KEY=your_api_key_here
-DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 ```
 
-也可以使用更通用的命名，例如：
+也可以使用更通用的命名：
 
 ```env
 LLM_PROVIDER=deepseek
 LLM_MODEL_ID=deepseek-chat
 LLM_API_KEY=your_api_key_here
-LLM_BASE_URL=https://api.deepseek.com
+LLM_BASE_URL=https://api.deepseek.com/v1
 ```
 
 注意：
 
-- 不要把真实的 API Key 提交到 GitHub
-- `.env` 只应该留在本地开发环境中
+- 不要把真实 API Key 提交到 GitHub
+- `.env` 只应该保留在本地
+- 如果你使用本地模型服务，也可以把 `provider` 和 `base_url` 指向本地兼容接口
 
-### 4. 运行当前示例
+### 4. 运行示例
 
 ```bash
 python main.py
 ```
 
-运行后，你应该能看到：
+当前 `main.py` 默认运行的是“记忆测试工作流”。
 
-- 当前测试问题
-- Agent 的最终回答
-- 每一轮的 `Thought / Action / Observation` 历史
-- 终端中的调试日志
+如果配置正确，终端会输出：
+
+- 最终答案
+- 执行轨迹
+- 记忆快照
+- 更干净的运行日志
+
+如果模型服务不可用或网络配置有问题，`main.py` 会尽量输出简洁错误，而不是直接刷一大段 SDK 堆栈。
 
 ## 当前支持的 Provider 方向
 
-`core/llm_client.py` 当前按 OpenAI-compatible 方式封装，代码里已经考虑了多种 provider 的兼容入口，例如：
+`core/llm_client.py` 当前按 OpenAI-compatible 方式封装，已经考虑了多种 provider 的兼容入口，例如：
 
 - OpenAI
 - DeepSeek
@@ -154,42 +233,42 @@ python main.py
 - MiniMax
 - Ollama
 - vLLM
-- 以及自定义 OpenAI-compatible Base URL
+- 自定义 OpenAI-compatible Base URL
 
-这里的目标不是“每家都做深度适配”，而是先统一消息格式和调用接口。
+这里的目标不是一次性做深度适配，而是先把消息格式、配置解析和调用接口统一起来。
 
 ## 当前限制
 
-这是一个还在继续补功能的仓库，目前有这些限制：
+这个仓库还在快速迭代，目前有这些限制：
 
-- 主要还是学习 /实验性质，还不算生产可用
-- 工具系统目前比较轻，只支持最基础的注册和调用
-- 目前主流程是文本版 ReAct，还没有全面切到原生 schema / tool_calls
-- 没有系统化测试
-- 文档会继续补充，代码结构也还会调整
+- 仍然偏学习 / 实验用途，不是生产框架
+- schema 和原生 tool calling 还没有完全接上
+- 工具系统目前比较轻量
+- 测试还不够系统化
+- 文档会继续补充，目录结构也可能继续调整
 
 ## 接下来准备继续做的事情
 
-后续大概率会逐步补这些方向：
+后续大概率会继续往这些方向补：
 
 - 工具参数 schema
 - 更多内置工具
-- 更清晰的日志和调试输出
+- 更完整的公共 Agent 抽象
 - 更稳定的多轮消息管理
-- 更完善的 README / 示例 / 测试
+- 更完善的测试和示例
 - 可能加入 memory / planning / RAG 等能力
 
 ## 为什么公开这个仓库
 
-这个仓库公开的目的，主要是记录“自己手写一个 Agent”这件事的过程。
+这个仓库公开的目的，主要是记录“自己手写一个 Agent”的过程。
 
-它不是一个已经打磨完成的成品，而是一个：
+它目前不是一个已经打磨完成的产品，而更像是：
 
 - 学习记录
 - 最小实现样板
 - 后续持续迭代的实验场
 
-如果你也在手写自己的 Agent，希望这个仓库未来能给你一点参考。
+如果你也在自己手写 Agent，希望这个仓库能给你一些实现层面的参考。
 
 ## 安全说明
 
@@ -197,14 +276,10 @@ python main.py
 
 - README 不包含任何真实密钥
 - 示例环境变量全部使用占位符
-- 当前文档只描述公开代码中的内容
+- 当前文档只描述仓库中已经公开的代码与能力
 
-如果你 fork / clone 这个仓库，请务必自己管理好本地 `.env` 和 API Key。
-
-## License
-
-当前仓库使用项目内已有的许可证文件，请参考 `LICENSE`。
+如果你 fork / clone 这个仓库，请务必自行管理好本地 `.env` 和 API Key。
 
 ---
 
-后续这个 README 会随着项目演进继续更新。
+README 会随着项目继续迭代而持续更新。
