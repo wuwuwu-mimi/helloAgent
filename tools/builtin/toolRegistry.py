@@ -1,65 +1,73 @@
-from typing import Any, Callable, Dict, List, Optional
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, List, Optional
+
+from tools.builtin.tool_base import Tool
+
+logger = logging.getLogger(__name__)
 
 
 class ToolRegistry:
-    """维护工具注册信息，并向 agent 提供统一查询入口。"""
+    """维护工具对象，并提供统一的注册、查询和描述生成能力。"""
 
-    def __init__(self):
-        # 每个工具都保存在一个简单字典里，后面如果要扩展 schema，
-        # 可以继续在这里追加字段，而不用改 Agent 主流程。
-        self.tools: Dict[str, Dict[str, Any]] = {}
+    def __init__(self) -> None:
+        # 修改说明：注册表里直接保存 Tool 对象，这样工具的名称、描述、参数定义和执行逻辑都能收敛到一个类里。
+        self.tools: Dict[str, Tool] = {}
 
-    def registerTool(
-        self,
-        name: str,
-        description: str,
-        func: Callable,
-        usage: Optional[str] = None,
-    ) -> None:
+    def register_tool(self, tool: Tool) -> None:
+        """注册一个工具对象；同名工具会被新的定义覆盖。"""
+        if tool.name in self.tools:
+            logger.warning("工具 `%s` 已存在，新的定义会覆盖旧版本。", tool.name)
+        else:
+            # 修改说明：注册日志降到 DEBUG，避免 main.py 演示时终端输出过于嘘杂。
+            logger.debug("注册工具: %s", tool.name)
+        self.tools[tool.name] = tool
+
+    def registerTool(self, tool: Tool) -> None:
+        """兼容旧命名风格，内部统一转到 `register_tool()`。"""
+        self.register_tool(tool)
+
+    def get_tool(self, name: str) -> Optional[Tool]:
+        """根据工具名获取 Tool 对象。"""
+        return self.tools.get(name)
+
+    def getTool(self, name: str) -> Optional[Tool]:
+        """兼容旧命名风格，内部统一转到 `get_tool()`。"""
+        return self.get_tool(name)
+
+    def list_tools(self) -> List[Tool]:
+        """返回当前所有已注册工具对象。"""
+        return list(self.tools.values())
+
+    def get_available_tools(self) -> List[Dict[str, Any]]:
         """
-        注册工具。
+        生成兼容 function calling 的工具描述列表。
 
-        参数说明：
-        - name: 工具名，供模型在 Action 中引用
-        - description: 工具用途说明
-        - func: 实际执行的 Python 函数
-        - usage: 可选，用自然语言补充调用方式，方便直接展示给模型
+        当前文本版 Agent 主要拿它来做工具清单展示；
+        后面如果切到原生 tool calling，这份结构也可以直接复用。
         """
-        if name in self.tools:
-            # 当前策略是允许覆盖注册，这样调试工具时不需要手动先删除。
-            print(f"Tool {name} already registered")
-
-        self.tools[name] = {
-            "description": description,
-            "func": func,
-            "usage": usage,
-        }
-        print(f"Tool {name} registered")
-
-    def getTool(self, name: str) -> Optional[Callable]:
-        """根据工具名获取对应的可调用函数。"""
-        return self.tools.get(name, {}).get("func")
-
-    def getAvailableTools(self) -> List[dict[str, Any]] | None:
-        """
-        获取所有可用工具的简化描述。
-
-        这里先返回一个接近 function calling 的结构，
-        但暂时只提供 name / description，便于文本版 ReAct 复用。
-        """
-        tools = []
-
-        for name, info in self.tools.items():
-            # usage 会被拼到描述里，让模型更容易知道该怎么写 Action。
-            description = info["description"]
-            if info.get("usage"):
-                description = f"{description} 用法: {info['usage']}"
-
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": description,
+        tools: List[Dict[str, Any]] = []
+        for tool in self.list_tools():
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.get_parameters_schema(),
+                    },
                 }
-            })
+            )
         return tools
+
+    def getAvailableTools(self) -> List[Dict[str, Any]]:
+        """兼容旧命名风格，内部统一转到 `get_available_tools()`。"""
+        return self.get_available_tools()
+
+    def describe_tools(self) -> str:
+        """把所有工具渲染成适合直接写进 Prompt 的文本。"""
+        tools = self.list_tools()
+        if not tools:
+            return "- 当前没有可用工具"
+        return "\n".join(tool.format_for_prompt() for tool in tools)

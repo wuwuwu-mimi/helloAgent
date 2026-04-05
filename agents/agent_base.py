@@ -1,17 +1,19 @@
 from abc import ABC, abstractmethod
-from typing import Optional, List
+from typing import List, Optional
 
-from core import HelloAgentsLLM, Config, Message
+from core import Config, HelloAgentsLLM, Message
 
 
 class Agent(ABC):
-    """Agent 基类"""
+    """所有 Agent 的基础抽象类。"""
 
-    def __init__(self,
-                 name: str,
-                 llm: HelloAgentsLLM,
-                 system_prompt: Optional[str] = None,
-                 config: Optional[Config] = None):
+    def __init__(
+        self,
+        name: str,
+        llm: HelloAgentsLLM,
+        system_prompt: Optional[str] = None,
+        config: Optional[Config] = None,
+    ):
         self.name = name
         self.llm = llm
         self.system_prompt = system_prompt
@@ -20,19 +22,18 @@ class Agent(ABC):
 
     @abstractmethod
     def run(self, input_text: str, stream: bool = True, **kwargs) -> str:
-        """运行Agent"""
-        pass
+        """运行 Agent 主流程。"""
 
     def add_message(self, message: Message):
-        """添加消息到历史记录"""
+        """向内部历史记录中追加一条消息。"""
         self._history.append(message)
 
     def clear_history(self):
-        """清空历史记录"""
+        """清空内部历史记录。"""
         self._history.clear()
 
     def get_history(self) -> list[Message]:
-        """获取历史记录"""
+        """获取当前历史记录的副本。"""
         return self._history.copy()
 
     def __str__(self):
