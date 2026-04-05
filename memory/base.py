@@ -40,6 +40,12 @@ class MemoryConfig(BaseModel):
     qdrant_local_path: str = ""
     qdrant_semantic_collection: str = "semantic_memory"
     qdrant_rag_collection: str = "rag_chunks"
+    graph_store_backend: str = "auto"
+    graph_store_path: str = "data/neo4j_graph.json"
+    neo4j_url: str = ""
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = ""
+    neo4j_database: str = "neo4j"
     working_memory_max_items: int = 20
     working_memory_ttl_seconds: int = 60 * 30
     recall_top_k: int = 6
@@ -47,6 +53,7 @@ class MemoryConfig(BaseModel):
     enable_semantic_memory: bool = True
     semantic_recall_top_k: int = 4
     semantic_score_threshold: float = 0.12
+    graph_recall_top_k: int = 3
     embedding_backend: str = "hash"
     embedding_dimensions: int = 96
     rag_store_path: str = "data/rag_index.json"
@@ -73,6 +80,12 @@ class MemoryConfig(BaseModel):
             or defaults.qdrant_semantic_collection,
             qdrant_rag_collection=_first_env("QDRANT_RAG_COLLECTION")
             or defaults.qdrant_rag_collection,
+            graph_store_backend=_first_env("GRAPH_STORE_BACKEND") or defaults.graph_store_backend,
+            graph_store_path=_first_env("GRAPH_STORE_PATH") or defaults.graph_store_path,
+            neo4j_url=_first_env("NEO4J_URL") or defaults.neo4j_url,
+            neo4j_user=_first_env("NEO4J_USER") or defaults.neo4j_user,
+            neo4j_password=_first_env("NEO4J_PASSWORD") or defaults.neo4j_password,
+            neo4j_database=_first_env("NEO4J_DATABASE") or defaults.neo4j_database,
             working_memory_max_items=_read_int(
                 defaults.working_memory_max_items,
                 "WORKING_MEMORY_MAX_ITEMS",
@@ -93,6 +106,10 @@ class MemoryConfig(BaseModel):
             semantic_recall_top_k=_read_int(
                 defaults.semantic_recall_top_k,
                 "SEMANTIC_RECALL_TOP_K",
+            ),
+            graph_recall_top_k=_read_int(
+                defaults.graph_recall_top_k,
+                "GRAPH_RECALL_TOP_K",
             ),
             semantic_score_threshold=_read_float(
                 defaults.semantic_score_threshold,

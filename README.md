@@ -25,6 +25,7 @@
 - 一个统一的 OpenAI-compatible LLM 调用层
 - 一个本地可运行的离线 embedding 实现
 - 一个 Qdrant 适配层：有真实 Qdrant 配置时优先接入，否则自动回退到本地 JSON
+- 一个 Neo4j 图谱适配层：有真实 Neo4j 配置时优先接入，否则自动回退到本地 JSON
 - 一个最小可用的本地 RAG pipeline（文档切片 / 索引 / 检索）
 - 一个 `main.py` 演示入口
 
@@ -94,22 +95,24 @@ Action: get_time[]
 
 - `WorkingMemory`：纯内存、带 TTL，用来保存最近上下文
 - `EpisodicMemory`：基于 SQLite / JSON fallback 的持久化记忆
-- `SemanticMemory`：基于本地 embedding + 向量检索的最小语义记忆
+- `SemanticMemory`：基于“向量检索 + 图谱检索”的双通道语义记忆
 - `MemoryManager`：统一协调写入、召回、去重和 prompt 注入
 - `memory_tool`：支持 `recent / search / remember / clear`
 
-当前这套语义检索已经开始兼容真实 Qdrant，当前阶段可以做到：
+当前这套语义检索已经开始兼容真实 Qdrant + Neo4j，当前阶段可以做到：
 
 - 把长期记忆同步写入向量存储
+- 把关键实体和关系同步写入图存储
 - 在后续 query 中做最小语义召回
 - 在没有额外服务依赖时自动回退到本地 JSON
 - 同一套向量存储能力同时复用于 `SemanticMemory` 和 `RAG`
+- 通过图谱通道额外保留“谁喜欢什么 / 某系统支持什么”这种关系结构
 
 后续还会继续往这些方向补：
 
-- Neo4j 图谱记忆
 - 更多文档格式解析
 - 基于检索结果的自动答案合成 / 重排
+- 更稳定的图谱实体抽取与关系归纳
 
 ## 项目结构
 
@@ -179,6 +182,12 @@ pip install openai python-dotenv pydantic
 pip install qdrant-client
 ```
 
+如果你准备接真实 Neo4j，再额外安装：
+
+```bash
+pip install neo4j
+```
+
 说明：
 
 - 仓库里的依赖清单还没有整理成正式可发布版本
@@ -217,6 +226,18 @@ QDRANT_RAG_COLLECTION=rag_chunks
 ```
 
 如果你不配置 `QDRANT_URL`，或者本地没有安装 `qdrant-client`，项目会自动回退到 JSON 向量存储。
+
+如果你想启用真实 Neo4j，可以继续加上这些可选配置：
+
+```env
+GRAPH_STORE_BACKEND=auto
+NEO4J_URL=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your_password_here
+NEO4J_DATABASE=neo4j
+```
+
+如果你不配置 `NEO4J_URL`，或者本地没有安装 `neo4j` Python 驱动，项目会自动回退到 JSON 图存储。
 
 注意：
 

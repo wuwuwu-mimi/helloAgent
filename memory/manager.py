@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from memory.base import MemoryConfig, MemoryItem
 from memory.embedding import EmbeddingServiceFactory
 from memory.storage.document_store import DocumentStore
+from memory.storage.neo4j_store import Neo4jGraphStore
 from memory.storage.qdrant_store import QdrantVectorStore
 from memory.types.episodic import EpisodicMemory
 from memory.types.semantic import SemanticMemory
@@ -27,6 +28,7 @@ class MemoryManager:
                 collection_name=self.config.qdrant_semantic_collection,
                 store_path=self.config.semantic_store_path,
             ),
+            graph_store=Neo4jGraphStore(self.config),
             embedding_service=self.embedding_service,
         )
 
